@@ -1,0 +1,1 @@
+"""House Monitor backend."""

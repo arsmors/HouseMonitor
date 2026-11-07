@@ -2,6 +2,7 @@
 
 import tempfile
 import unittest
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -25,6 +26,19 @@ class StoreTests(unittest.TestCase):
         """Close the test database."""
         self.store.close()
 
+    def test_default_search_includes_all_six_areas(self):
+        """Seed the default search and catalog with every configured area."""
+        expected = {
+            "ss:riga-region/carnikavas-nov",
+            "ss:riga/vecaki",
+            "ss:riga/mangalsala",
+            "ss:riga/vecdaugava",
+            "ss:riga/trisciems",
+            "ss:riga/jaunciems",
+        }
+        self.assertEqual(set(self.store.searches()[0]["locations"]), expected)
+        self.assertTrue(expected.issubset(self.store.locations()))
+
     def test_baseline_duplicates_and_queue(self):
         """First scan stays quiet, new IDs queue once, overlapping scopes stay quiet."""
         self.assertEqual(self.store.ingest("ss:vecaki", [listing("old")])["queued"], 0)
@@ -37,6 +51,60 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(len(self.store.pending(50)), 1)
         self.store.delivery(job["id"], "sent", message_id=123)
         self.assertEqual(self.store.pending(100), [])
+
+    def test_ingest_excludes_buyer_requests(self):
+        """Do not persist buyer requests as sale listings."""
+        buyer_request = listing("ss:wanted")
+        buyer_request.title = "Nopirksim māju"
+        buyer_request.price = "pērku"
+        result = self.store.ingest("scope", [buyer_request, listing("ss:for-sale")])
+        self.assertEqual(result["total"], 1)
+        self.assertEqual([item["id"] for item in self.store.listings()], ["ss:for-sale"])
+
+    def test_cleanup_removes_legacy_buyer_request_history(self):
+        """Delete old buyer-request rows and their search and notification references."""
+        buyer_request = listing("ss:legacy-wanted")
+        buyer_request.title = "Nopirksim māju"
+        buyer_request.price = "pērku"
+        search_id = self.store.searches()[0]["id"]
+        with self.store.db:
+            self.store.db.execute("INSERT INTO listings VALUES(?,?,?,?,?)", (buyer_request.id, buyer_request.source, json.dumps(buyer_request.record()), "2026-11-05T10:00:00+00:00", "2026-11-05T10:00:00+00:00"))
+            self.store.db.execute("INSERT INTO search_history VALUES(?,?,?)", (search_id, buyer_request.id, "2026-11-05T10:00:00+00:00"))
+            self.store.db.execute("INSERT INTO notifications(search_id,listing_id) VALUES(?,?)", (search_id, buyer_request.id))
+        self.assertEqual(self.store.remove_buyer_requests(), 1)
+        self.assertEqual(self.store.db.execute("SELECT count(*) FROM listings WHERE id=?", (buyer_request.id,)).fetchone()[0], 0)
+        self.assertEqual(self.store.db.execute("SELECT count(*) FROM search_history WHERE listing_id=?", (buyer_request.id,)).fetchone()[0], 0)
+        self.assertEqual(self.store.db.execute("SELECT count(*) FROM notifications WHERE listing_id=?", (buyer_request.id,)).fetchone()[0], 0)
+
+    def test_price_history_tracks_changes_and_exact_address_relists(self):
+        """Record price changes and join new IDs only for exact address and area."""
+        original = listing("ss:old")
+        original.address = "  14 Šalkones   iela "
+        with patch("backend.store.now", return_value="2026-11-05T10:00:00+00:00"):
+            self.store.ingest("scope", [original])
+        repriced = listing("ss:old")
+        repriced.address = "14 Šalkones iela"
+        repriced.price = "95,000 €"
+        with patch("backend.store.now", return_value="2026-11-06T10:00:00+00:00"):
+            self.store.ingest("scope", [repriced])
+        relisted = listing("ss:new")
+        relisted.address = "14 Šalkones iela"
+        relisted.price = "90,000 €"
+        other_house = listing("ss:other")
+        other_house.address = "16 Šalkones iela"
+        other_house.price = "85,000 €"
+        same_street_elsewhere = listing("ss:elsewhere")
+        same_street_elsewhere.address = relisted.address
+        same_street_elsewhere.location = "Carnikava"
+        same_street_elsewhere.price = "80,000 €"
+        with patch("backend.store.now", return_value="2026-11-07T10:00:00+00:00"):
+            self.store.ingest("scope", [relisted, other_house, same_street_elsewhere])
+        records = {record["id"]: record for record in self.store.listings()}
+        history = records["ss:new"]["price_history"]
+        self.assertEqual([entry["price"] for entry in history], ["100,000 €", "95,000 €", "90,000 €"])
+        self.assertEqual([entry["listing_id"] for entry in history], ["ss:old", "ss:old", "ss:new"])
+        self.assertEqual([entry["price"] for entry in records["ss:other"]["price_history"]], ["85,000 €"])
+        self.assertEqual([entry["price"] for entry in records["ss:elsewhere"]["price_history"]], ["80,000 €"])
 
     def test_pause_resume_edit_and_history(self):
         """Editing keeps history and paused searches cannot send queued work."""
@@ -54,6 +122,31 @@ class StoreTests(unittest.TestCase):
         self.store.delete_search(search["id"])
         self.assertEqual(self.store.pending(100), [])
         self.assertEqual(len(self.store.listings()), 2)
+
+    def test_relist_moves_to_top_without_refreshing_its_discovery_time(self):
+        """A new ID for a known house outranks newer publication dates on older ads."""
+        original = listing("ss:original")
+        original.address = "Street 14"
+        original.published_at = "2026-11-01T10:00:00+00:00"
+        other = listing("ss:other-house")
+        other.address = "Street 16"
+        other.published_at = "2026-11-06T10:00:00+00:00"
+        with patch("backend.store.now", return_value="2026-11-06T12:00:00+00:00"):
+            self.store.ingest("scope", [original, other])
+        relisted = listing("ss:relisted")
+        relisted.address = original.address
+        relisted.published_at = original.published_at
+        with patch("backend.store.now", return_value="2026-11-07T10:00:00+00:00"):
+            self.store.ingest("scope", [relisted])
+        top = self.store.listings(limit=1)[0]
+        self.assertEqual(top["id"], relisted.id)
+        self.assertEqual(top["relisted_at"], "2026-11-07T10:00:00+00:00")
+        records = {record["id"]: record for record in self.store.listings()}
+        self.assertIsNone(records[original.id]["relisted_at"])
+        self.assertIsNone(records[other.id]["relisted_at"])
+        with patch("backend.store.now", return_value="2026-11-08T10:00:00+00:00"):
+            self.store.ingest("scope", [original, relisted])
+        self.assertEqual(self.store.listings(limit=1)[0]["relisted_at"], top["relisted_at"])
 
     def test_restart_and_uncertain_delivery(self):
         """Persist state and quarantine interrupted sends rather than duplicate them."""

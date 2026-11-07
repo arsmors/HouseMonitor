@@ -23,7 +23,7 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         """Seed one due notification in an isolated outbox."""
         self.store = Store(":memory:")
-        self.monitor = Monitor(self.store)
+        self.monitor = Monitor(self.store, rentinriga=False)
         self.monitor.owner_id = 123
         self.monitor.bot = AsyncMock()
         self.monitor.bot.send_message.return_value = SimpleNamespace(message_id=42)
@@ -148,6 +148,25 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(monitor.next_scan, datetime(2026, 11, 5, 13, tzinfo=timezone.utc).timestamp())
         self.assertEqual(self.store.setting("next_scan"), monitor.next_scan)
 
+    async def test_rentinriga_source_baseline_and_deduplication(self):
+        """New provider matches are stored silently on baseline and not queued twice."""
+        self.store.set_setting("catalog_loaded", True)
+        self.monitor.city24_enabled = False
+        self.monitor.rentinriga_enabled = True
+        self.monitor.ss = SimpleNamespace(collect=AsyncMock(return_value=[]), locations=self.store.locations())
+        house = Listing("rentinriga:63973", "RentInRiga.lv", "Lilaste 40A", "https://www.rentinriga.lv/lv/maju-pardosana/lilaste-40a/63973", "330 000 €", "Lilaste, Carnikavas pag.", ["ss:riga-region/carnikavas-nov"], 191, "191 m²", "parsed")
+        before = self.store.status()["queue"]
+        with patch("backend.service.RentInRigaAdapter.collect", new=AsyncMock(return_value=[house])):
+            await self.monitor.cycle()
+            await self.monitor.cycle()
+        source = self.store.status()["sources"]["RentInRiga.lv"]
+        self.assertEqual(source["status"], "ok")
+        self.assertEqual(source["total"], 1)
+        self.assertEqual(source["queued"], 0)
+        self.assertEqual(source["discovered"], 0)
+        self.assertEqual(self.store.status()["queue"], before)
+        self.assertTrue(any(listing["id"] == house.id for listing in self.store.listings()))
+
     async def test_sources_fail_independently(self):
         """Keep successful SS.lv state when City24 fails and Latio is disabled."""
         self.store.set_setting("catalog_loaded", True)
@@ -158,6 +177,19 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sources["SS.lv"]["status"], "ok")
         self.assertEqual(sources["City24.lv"]["status"], "error")
         self.assertEqual(sources["Latio.lv"]["status"], "permission_required")
+
+    async def test_no_searches_collects_default_areas_without_alerts(self):
+        """Deleting searches retains default-area collection but queues no alerts."""
+        from backend.sources import RECENT_LOCATION_IDS
+        for search in self.store.searches():
+            self.store.delete_search(search["id"])
+        self.store.set_setting("catalog_loaded", True)
+        self.monitor.city24_enabled = False
+        self.monitor.ss = SimpleNamespace(collect=AsyncMock(return_value=[]), locations=self.store.locations())
+        await self.monitor.cycle()
+        self.assertEqual({call.args[0] for call in self.monitor.ss.collect.await_args_list}, {location.removeprefix("ss:") for location in RECENT_LOCATION_IDS})
+        self.assertEqual(self.store.status()["sources"]["SS.lv"]["status"], "ok")
+        self.assertEqual(self.store.pending(0), [])
 
 
 if __name__ == "__main__":

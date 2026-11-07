@@ -13,7 +13,7 @@ from aiohttp import web
 from dotenv import load_dotenv
 
 from backend.service import DEFAULT_INTERVAL, Monitor
-from backend.sources import match
+from backend.sources import RECENT_LOCATION_IDS
 from backend.store import Store
 from backend.telegram import run_bot
 
@@ -54,7 +54,7 @@ async def state(request: web.Request):
     """Serve current backend data, never illustrative listings or secrets."""
     monitor = request.app["monitor"]
     searches = monitor.store.searches()
-    listings = [listing for listing in monitor.store.listings(10000) if any(match(listing, search) for search in searches)]
+    listings = [listing for listing in monitor.store.listings(10000) if set(RECENT_LOCATION_IDS).intersection(listing["location_ids"])]
     return web.json_response({"searches": searches, "listings": listings, "locations": list(monitor.store.locations().values()), "status": monitor.status()})
 
 
@@ -143,7 +143,7 @@ def create_app(store: Store | None = None, start_tasks: bool = True) -> web.Appl
     app["web_password"] = os.getenv("WEB_PASSWORD", "")
     app["monitor"] = Monitor(store or Store(os.getenv("DATABASE_PATH", str(ROOT / "data" / "monitor.db"))),
                              int(os.getenv("POLL_INTERVAL", str(DEFAULT_INTERVAL))), os.getenv("CITY24_ENABLED", "true").lower() == "true",
-                             os.getenv("LATIO_PERMISSION_CONFIRMED", "false").lower() == "true")
+                             os.getenv("LATIO_PERMISSION_CONFIRMED", "false").lower() == "true", os.getenv("RENTINRIGA_ENABLED", "true").lower() == "true")
     app.add_routes([web.get("/api/state", state), web.post("/api/searches", save_search), web.put("/api/searches/{id:\\d+}", save_search),
                     web.delete("/api/searches/{id:\\d+}", delete_search), web.get("/api/locations", locations), web.post("/api/scan", scan),
                     web.put("/api/settings", settings), web.get("/api/health", health), web.get("/", index)])

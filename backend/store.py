@@ -5,7 +5,7 @@ import math
 import sqlite3
 from pathlib import Path
 
-from backend.sources import DEFAULT_LABELS, DEFAULT_PATHS, Listing, match, now
+from backend.sources import DEFAULT_LABELS, DEFAULT_PATHS, Listing, is_sale_listing, match, now, relist_key
 
 
 class Store:
@@ -28,6 +28,11 @@ class Store:
             CREATE TABLE IF NOT EXISTS listings (
                 id TEXT PRIMARY KEY, source TEXT NOT NULL, data TEXT NOT NULL,
                 first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS listing_price_history (
+                id INTEGER PRIMARY KEY, history_key TEXT NOT NULL,
+                listing_id TEXT NOT NULL REFERENCES listings(id),
+                price TEXT NOT NULL, observed_at TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS listing_price_history_key ON listing_price_history(history_key,id);
             CREATE TABLE IF NOT EXISTS scopes (id TEXT PRIMARY KEY, baseline_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS search_history (
                 search_id INTEGER NOT NULL REFERENCES searches(id),
@@ -52,6 +57,8 @@ class Store:
             for path, label in zip(DEFAULT_PATHS, DEFAULT_LABELS):
                 record = {"id": "ss:" + path, "label": label, "path": path, "parent": "ss:" + path.rsplit("/", 1)[0], "group": "Selected areas"}
                 self.db.execute("INSERT OR IGNORE INTO locations VALUES(?,?)", (record["id"], json.dumps(record)))
+        self.removed_buyer_requests = self.remove_buyer_requests()
+        self._backfill_price_history()
 
     def close(self):
         """Release the SQLite handle on service shutdown."""
@@ -121,8 +128,38 @@ class Store:
             self.db.execute("UPDATE searches SET deleted=1,active=0 WHERE id=?", (search_id,))
             self.db.execute("UPDATE notifications SET status='cancelled' WHERE search_id=? AND status IN ('pending','failed')", (search_id,))
 
+    def remove_buyer_requests(self) -> int:
+        """Permanently remove legacy SS.lv buyer requests and their related history."""
+        rows = self.db.execute("SELECT id,data FROM listings WHERE source='SS.lv'").fetchall()
+        identifiers = [row["id"] for row in rows if not is_sale_listing(json.loads(row["data"]))]
+        if not identifiers:
+            return 0
+        placeholders = ",".join("?" for _ in identifiers)
+        with self.db:
+            self.db.execute(f"DELETE FROM notifications WHERE listing_id IN ({placeholders})", identifiers)
+            self.db.execute(f"DELETE FROM search_history WHERE listing_id IN ({placeholders})", identifiers)
+            self.db.execute(f"DELETE FROM listing_price_history WHERE listing_id IN ({placeholders})", identifiers)
+            self.db.execute(f"DELETE FROM listings WHERE id IN ({placeholders})", identifiers)
+        return len(identifiers)
+
+    def _backfill_price_history(self):
+        """Seed known current prices as the starting point for exact-address histories."""
+        with self.db:
+            for row in self.db.execute("SELECT id,data,first_seen_at FROM listings ORDER BY julianday(first_seen_at),rowid").fetchall():
+                record = json.loads(row["data"])
+                key = relist_key(record)
+                price = str(record.get("price", "")).strip()
+                if key and price:
+                    self.db.execute(
+                        "INSERT INTO listing_price_history(history_key,listing_id,price,observed_at) "
+                        "SELECT ?,?,?,? WHERE NOT EXISTS "
+                        "(SELECT 1 FROM listing_price_history WHERE history_key=? AND listing_id=?)",
+                        (key, row["id"], price, row["first_seen_at"], key, row["id"]),
+                    )
+
     def ingest(self, scope: str, listings: list[Listing]) -> dict:
         """Atomically store a complete scope, its baseline, matches and outbox jobs."""
+        listings = [listing for listing in listings if is_sale_listing(listing.record())]
         active = [search for search in self.searches() if search["active"]]
         baseline = self.db.execute("SELECT 1 FROM scopes WHERE id=?", (scope,)).fetchone() is None
         timestamp = now()
@@ -131,8 +168,9 @@ class Store:
         with self.db:
             for listing in listings:
                 record = listing.record()
-                previous = self.db.execute("SELECT data FROM listings WHERE id=?", (listing.id,)).fetchone()
+                previous = self.db.execute("SELECT data,first_seen_at FROM listings WHERE id=?", (listing.id,)).fetchone()
                 existing = previous is not None
+                cached = None
                 if previous:
                     cached = json.loads(previous["data"])
                     if not record.get("published_at") and cached.get("published_at"):
@@ -141,6 +179,15 @@ class Store:
                         for key in ["image", "image_thumbnail", "image_checked_at"]:
                             record[key] = cached[key]
                 self.db.execute("INSERT INTO listings VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,last_seen_at=excluded.last_seen_at", (listing.id, listing.source, json.dumps(record), timestamp, timestamp))
+                key = relist_key(record)
+                price = str(record.get("price", "")).strip()
+                if key and price:
+                    latest = self.db.execute("SELECT listing_id,price FROM listing_price_history WHERE history_key=? ORDER BY id DESC LIMIT 1", (key,)).fetchone()
+                    if latest is None and cached and cached.get("price"):
+                        self.db.execute("INSERT INTO listing_price_history(history_key,listing_id,price,observed_at) VALUES(?,?,?,?)", (key, listing.id, str(cached["price"]).strip(), previous["first_seen_at"]))
+                        latest = {"listing_id": listing.id, "price": str(cached["price"]).strip()}
+                    if latest is None or latest["listing_id"] != listing.id or latest["price"] != price:
+                        self.db.execute("INSERT INTO listing_price_history(history_key,listing_id,price,observed_at) VALUES(?,?,?,?)", (key, listing.id, price, timestamp))
                 discovered += not existing
                 for search in active:
                     if not match(record, search):
@@ -152,8 +199,45 @@ class Store:
         return {"baseline": baseline, "discovered": discovered, "queued": queued, "total": len(listings)}
 
     def listings(self, limit: int = 1000) -> list[dict]:
-        """Sort by publication date, falling back to discovery when no valid date exists."""
-        return [{**json.loads(row["data"]), "first_seen_at": row["first_seen_at"], "last_seen_at": row["last_seen_at"]} for row in self.db.execute("SELECT * FROM listings ORDER BY COALESCE(julianday(json_extract(data, '$.published_at')), julianday(first_seen_at)) DESC, julianday(first_seen_at) DESC, rowid DESC LIMIT ?", (limit,))]
+        """Sort relists by rediscovery and other ads by publication or discovery."""
+        rows = self.db.execute(
+            "SELECT *,rowid AS discovery_order,julianday(first_seen_at) AS discovered,"
+            "COALESCE(julianday(json_extract(data, '$.published_at')),julianday(first_seen_at)) AS published "
+            "FROM listings"
+        ).fetchall()
+        ordering = {row["id"]: (row["published"], row["discovered"], row["discovery_order"]) for row in rows}
+        records = [{**json.loads(row["data"]), "first_seen_at": row["first_seen_at"], "last_seen_at": row["last_seen_at"]} for row in rows]
+        records = [record for record in records if is_sale_listing(record)]
+        history_keys = {relist_key(record) for record in records}
+        history_keys.discard(None)
+        histories = {}
+        if history_keys:
+            placeholders = ",".join("?" for _ in history_keys)
+            for row in self.db.execute(
+                f"SELECT history_key,listing_id,price,observed_at FROM listing_price_history "
+                f"WHERE history_key IN ({placeholders}) ORDER BY julianday(observed_at),id",
+                tuple(history_keys),
+            ):
+                histories.setdefault(row["history_key"], []).append(
+                    {"listing_id": row["listing_id"], "price": row["price"], "observed_at": row["observed_at"]}
+                )
+        for record in records:
+            record["price_history"] = histories.get(relist_key(record), [])
+            current = ordering[record["id"]]
+            record["relisted_at"] = None
+            for observation in record["price_history"]:
+                previous = ordering[observation["listing_id"]]
+                if observation["listing_id"] != record["id"] and previous[1:] < current[1:]:
+                    record["relisted_at"] = record["first_seen_at"]
+                    break
+        records.sort(
+            key=lambda record: (
+                ordering[record["id"]][1] if record["relisted_at"] else ordering[record["id"]][0],
+                *ordering[record["id"]][1:],
+            ),
+            reverse=True,
+        )
+        return records[:limit] if limit >= 0 else records
 
     def update_image(self, listing_id: str, image: str | None, checked_at: float):
         """Persist photo enrichment without changing discovery times or notification history."""

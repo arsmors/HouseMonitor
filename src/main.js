@@ -14,6 +14,7 @@ let loaded = false;
 let view = 'listings';
 let filter = 'all';
 let selectedSearch = null;
+let selectedLocation = null;
 let selectedListing = null;
 let notificationEnabled = true;
 const app = document.querySelector('#app');
@@ -33,18 +34,22 @@ function locationLabel(id) { return catalog[id]?.label || id; }
 function listingDateLabel(listing) {
   const published = new Date(listing.published_at || '');
   const hasPublication = !Number.isNaN(published.getTime());
-  const timestamp = hasPublication ? published : new Date(listing.first_seen_at);
+  const timestamp = listing.relisted_at ? new Date(listing.relisted_at) : hasPublication ? published : new Date(listing.first_seen_at);
   if (Number.isNaN(timestamp.getTime())) return 'Date unavailable';
   const date = timestamp.toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-  return `${hasPublication ? 'Published' : 'Discovered'} ${date}`;
+  return `${listing.relisted_at ? 'Relisted' : hasPublication ? 'Published' : 'Discovered'} ${date}`;
 }
 /** Refresh shared server state without interrupting an open search form. */
 async function refresh() {
+  let contentChanged = true;
   try {
     const data = await api('/api/state');
+    const nextCatalog = Object.fromEntries(data.locations.map(location => [location.id, location]));
+    contentChanged = !loaded || Boolean(connectionError)
+      || JSON.stringify([searches, listings, catalog]) !== JSON.stringify([data.searches, data.listings, nextCatalog]);
     searches = data.searches;
     listings = data.listings;
-    catalog = Object.fromEntries(data.locations.map(location => [location.id, location]));
+    catalog = nextCatalog;
     locationGroups = {};
     for (const location of data.locations) (locationGroups[location.group || 'Latvia'] ||= []).push(location.id);
     backendStatus = data.status;
@@ -55,7 +60,10 @@ async function refresh() {
     connectionError = error.message || 'Backend unavailable';
     backendStatus = { ...backendStatus, scanning: false };
   }
-  if (!dialog.open) render();
+  if (!dialog.open) {
+    if (contentChanged || connectionError || ['activity', 'settings'].includes(view) || !app.querySelector('.listing-card')) render();
+    else updateProgress();
+  }
 }
 function drawIcons() { createIcons({ icons, attrs: { 'stroke-width': 1.7 } }); }
 function areaLabel(search) { return search.min && search.max ? `${search.min}–${search.max} m²` : search.min ? `From ${search.min} m²` : search.max ? `Up to ${search.max} m²` : 'Any property area'; }
@@ -77,10 +85,35 @@ function matchesSearch(listing, search) {
     && (search.min == null || listing.area != null && listing.area >= search.min)
     && (search.max == null || listing.area != null && listing.area <= search.max);
 }
+function listingFilterLocation(listing) {
+  return (listing.location_ids || []).filter(id => catalog[id]).sort((left, right) => right.split('/').length - left.split('/').length)[0] || null;
+}
+function priceHistory(listing) {
+  const history = listing.price_history || [];
+  if (!history.length) return '';
+  return `<details class="price-history"><summary>Price history · ${history.length} ${history.length === 1 ? 'record' : 'records'}</summary><ol>${history.map((record, index) => {
+    const date = new Date(record.observed_at);
+    const label = Number.isNaN(date.getTime()) ? 'Date unavailable' : date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+    const relisted = index > 0 && history[index - 1].listing_id !== record.listing_id;
+    return `<li><time>${escape(label)}</time><strong>${escape(record.price)}</strong>${relisted ? '<span>Relisted</span>' : ''}</li>`;
+  }).join('')}</ol></details>`;
+}
+function matchingListings() {
+  return listings;
+}
 /** Use the same filtered listings for cards and the notification preview. */
 function visibleListings() {
-  const relevantSearches = searches.filter(search => selectedSearch ? search.id === selectedSearch : search.active);
-  return listings.filter(listing => relevantSearches.some(search => matchesSearch(listing, search)));
+  return matchingListings().filter(listing => !selectedLocation || listing.location_ids.includes(selectedLocation));
+}
+function locationFilterTags() {
+  const matching = matchingListings();
+  const counts = new globalThis.Map();
+  for (const listing of matching) {
+    const id = listingFilterLocation(listing);
+    if (id) counts.set(id, matching.filter(candidate => candidate.location_ids.includes(id)).length);
+  }
+  const tags = [...counts].sort(([left], [right]) => locationLabel(left).localeCompare(locationLabel(right), 'lv'));
+  return `<div class="location-filter-tags" role="group" aria-label="Filter ads by location"><span class="location-filter-caption">Locations</span><button class="location-tag" type="button" data-clear-location aria-label="Show ads in all locations (${matching.length} listings)" aria-pressed="${!selectedLocation}">All <span class="location-tag-count">${matching.length}</span></button>${tags.map(([id, count]) => `<button class="location-tag" type="button" data-location-filter="${escape(id)}" aria-label="Filter ads in ${escape(locationLabel(id))} (${count} listings)" aria-pressed="${selectedLocation === id}" title="Filter ads in ${escape(locationLabel(id))}"><span>${escape(locationLabel(id))}</span><span class="location-tag-count">${count}</span></button>`).join('')}</div>`;
 }
 function searchCard(search) {
   return `<article class="search-card ${search.active ? '' : 'is-paused'}">
@@ -91,7 +124,13 @@ function searchCard(search) {
   </article>`;
 }
 function listingCard(listing) {
-  return `<article class="listing-card ${selectedListing === listing.id ? 'selected' : ''}"><a class="listing-image" href="${escape(listing.url)}" target="_blank" rel="noopener noreferrer" aria-label="Open advertisement on ${escape(listing.source)}: ${escape(listing.title)}">${listing.image ? `<img src="${escape(listing.image)}" alt="${escape(listing.title)}" loading="lazy" referrerpolicy="no-referrer" />` : `<div class="no-image">${icon('house')}</div>`}<span>${escape(listing.source)}</span></a><div class="listing-body"><div class="listing-price">${escape(listing.price)}<span>${listing.area != null ? `${listing.area} m²` : 'Area not provided'}</span></div><h3><a class="listing-title-link" href="${escape(listing.url)}" target="_blank" rel="noopener noreferrer">${escape(listing.title)}</a></h3><div class="listing-location">${icon('map-pin')} ${escape(listing.location)}</div><div class="listing-footer"><span>${escape(listing.source)}</span><span>${escape(listingDateLabel(listing))}</span><button class="icon-button" data-listing="${escape(listing.id)}" title="Preview Telegram notification" aria-label="Preview Telegram notification for ${escape(listing.title)}">${icon('send')}</button></div></div></article>`;
+  const relistBadge = listing.relisted_at ? '<div class="relisted-badge">Relisted</div>' : '';
+  const locationId = listingFilterLocation(listing);
+  const locationLabelText = locationId ? locationLabel(locationId) : '';
+  const location = locationId
+    ? `<button class="location-filter-trigger" type="button" data-location-filter="${escape(locationId)}" aria-label="Filter ads in ${escape(locationLabelText)}" aria-pressed="${selectedLocation === locationId}" title="Filter ads in ${escape(locationLabelText)}">${escape(listing.location)}</button>`
+    : `<span>${escape(listing.location)}</span>`;
+  return `<article class="listing-card ${selectedListing === listing.id ? 'selected' : ''}"><a class="listing-image" href="${escape(listing.url)}" target="_blank" rel="noopener noreferrer" aria-label="Open advertisement on ${escape(listing.source)}: ${escape(listing.title)}">${listing.image ? `<img src="${escape(listing.image)}" alt="${escape(listing.title)}" loading="lazy" referrerpolicy="no-referrer" />` : `<div class="no-image">${icon('house')}</div>`}<span>${escape(listing.source)}</span></a><div class="listing-body">${relistBadge}<div class="listing-price">${escape(listing.price)}<span>${listing.area != null ? `${listing.area} m²` : 'Area not provided'}</span></div>${priceHistory(listing)}<h3><a class="listing-title-link" href="${escape(listing.url)}" target="_blank" rel="noopener noreferrer">${escape(listing.title)}</a></h3><div class="listing-location">${icon('map-pin')} ${location}</div><div class="listing-footer"><span>${escape(listing.source)}</span><span>${escape(listingDateLabel(listing))}</span><button class="icon-button" data-listing="${escape(listing.id)}" title="Preview Telegram notification" aria-label="Preview Telegram notification for ${escape(listing.title)}">${icon('send')}</button></div></div></article>`;
 }
 function telegramPreview() {
   const matching = visibleListings();
@@ -112,7 +151,7 @@ function mainContent() {
   const selectedAreas = [...new Set(searches.filter(search => selectedSearch ? search.id === selectedSearch : search.active).flatMap(search => search.locations))].map(locationLabel);
   if (view === 'settings') return `<div class="page-heading"><div><div class="eyebrow">MAKE IT YOURS</div><h1>Settings</h1><p>The essentials, kept simple.</p></div></div><section class="settings-section"><h2>Telegram notifications</h2><div class="setting-row"><div><strong>Listing notifications</strong><p>Notifications for active searches</p></div><button class="switch ${notificationEnabled ? 'on' : ''}" role="switch" aria-checked="${notificationEnabled}" aria-label="Listing notifications" id="notifications-toggle"><span></span></button></div><div class="setting-row"><div><strong>Telegram connection</strong><p>${escape(backendStatus.telegram.error || (backendStatus.telegram.ready ? `@${backendStatus.telegram.username}` : 'Bot connected; waiting for /start from owner'))}</p></div><span class="neutral-badge">${backendStatus.telegram.ready ? 'Connected' : backendStatus.telegram.configured ? 'Awaiting /start' : 'Not configured'}</span></div><h2>Monitoring</h2><div class="setting-row"><div><strong>Polling interval</strong><p>Non-overlapping source scans</p></div><span class="neutral-badge">${backendStatus.interval / 60} minutes</span></div>${Object.entries(backendStatus.sources).map(([source, state]) => `<div class="setting-row"><div><strong>${escape(source)}</strong><p>${escape(state.error || (state.last_success ? `Last success: ${new Date(state.last_success).toLocaleString()}` : 'Waiting for first scan'))}</p></div><span class="neutral-badge">${escape(state.status.replaceAll('_', ' '))}</span></div>`).join('')}<h2>Your data</h2><div class="setting-row"><div><strong>Searches and listing history</strong><p>Persistent SQLite database on the server</p></div><span class="neutral-badge">${searches.length} searches</span></div></section>`;
   if (view === 'activity') return `<div class="page-heading"><div><div class="eyebrow">BEHIND THE SCENES</div><h1>Monitoring activity</h1><p>${backendStatus.scanning ? 'Collecting source listings now' : backendStatus.last_scan ? `Last cycle: ${new Date(backendStatus.last_scan).toLocaleString()}` : 'Waiting for the first cycle'}</p></div><button class="secondary-button" data-scan ${backendStatus.scanning ? 'disabled' : ''}>${icon('radar')} Check now</button></div><section class="settings-section">${Object.entries(backendStatus.sources).map(([source, state]) => `<div class="setting-row"><div><strong>${escape(source)}</strong><p>${escape(state.error || `${state.total || 0} listings checked · ${state.queued || 0} alerts queued`)}</p></div><span class="neutral-badge">${escape(state.status.replaceAll('_', ' '))}</span></div>`).join('')}<h2>Notification queue</h2>${Object.entries(backendStatus.queue).map(([status, count]) => `<div class="activity-detail"><span>${escape(status)}</span><strong>${count}</strong></div>`).join('') || '<p class="field-hint">No queued notifications. First scans establish a baseline without alerts.</p>'}${backendStatus.queue.uncertain ? '<p class="form-error">Unconfirmed deliveries need a chat check before manual retry to avoid duplicate alerts.</p>' : ''}<h2>Recent activity</h2>${backendStatus.events.map(event => `<div class="activity-detail"><span>${escape(new Date(event.created_at).toLocaleString())}</span><strong>${escape(event.message)}</strong></div>`).join('') || '<p class="field-hint">No monitoring events yet.</p>'}</section>`;
-  if (view === 'listings') return `<div class="page-heading"><div><div class="eyebrow">YOUR NEXT CHAPTER</div><h1>${selectedSearch ? escape(searches.find(search => search.id === selectedSearch)?.name || 'Recent listings') : 'Houses in your areas'}</h1><p>${selectedAreas.length ? selectedAreas.map(escape).join(' · ') : searches.some(search => search.active) ? 'All Latvia' : 'No active searches'}</p></div><button class="secondary-button" data-nav="searches">${icon('list-filter')} Edit searches</button></div><div class="section-heading"><h2>${selectedSearch ? 'Search matches' : 'Latest discoveries'} <span>${recent.length}</span></h2><button class="text-button" data-scan ${backendStatus.scanning ? 'disabled' : ''}>${icon('radar')} ${backendStatus.scanning ? 'Checking sources…' : 'Check now'}</button></div><div class="listing-grid full-listings">${recent.length ? recent.map(listingCard).join('') : `<div class="empty-state">${!loaded ? 'Connecting to the monitoring service…' : backendStatus.scanning ? 'Checking your areas for houses…' : 'No houses match your saved search criteria yet.'}</div>`}</div>`;
+  if (view === 'listings') return `<div class="page-heading"><div><div class="eyebrow">YOUR NEXT CHAPTER</div><h1>Recent listings</h1><p>Vecdaugava · Vecāķi · Carnikavas novads · Trīsciems · Jaunciems</p></div></div>${locationFilterTags()}<div class="section-heading"><h2>Latest discoveries <span>${recent.length}</span></h2><button class="text-button" data-scan ${backendStatus.scanning ? 'disabled' : ''}>${icon('radar')} ${backendStatus.scanning ? 'Checking sources…' : 'Check now'}</button></div><div class="listing-grid full-listings">${recent.length ? recent.map(listingCard).join('') : `<div class="empty-state">${!loaded ? 'Connecting to the monitoring service…' : backendStatus.scanning ? 'Checking sources for houses…' : selectedLocation ? 'No ads match this location filter.' : 'No houses discovered yet.'}</div>`}</div>`;
   return `<div class="page-heading"><div><div class="eyebrow">LESS SEARCHING. MORE LIVING.</div><h1>Your next home is out there.</h1><p>We’ll keep an eye out. You carry on with your day.</p></div><button class="primary-button" id="new-search">${icon('plus')} New search</button></div>
     <div class="monitor-strip"><span class="monitor-symbol">${icon('radar')}</span><div><strong>Your house hunt, on autopilot.</strong><span>${searches.filter(search => search.active).length} active searches <b>·</b> Every ${intervalLabel()}</span></div><span class="demo-status"><span></span>${backendStatus.scanning ? 'Scanning' : 'Monitoring'}</span></div>
     <section class="search-section"><div class="section-heading"><h2>Saved searches <span>${searches.length}</span></h2><div class="segmented" aria-label="Filter searches">${['all','active','paused'].map(item => `<button data-filter="${item}" class="${filter === item ? 'selected' : ''}" aria-pressed="${filter === item}">${item[0].toUpperCase() + item.slice(1)}</button>`).join('')}</div></div><div class="search-grid">${filtered.length ? filtered.map(searchCard).join('') : `<div class="empty-state">${icon('search')}<h3>No ${filter === 'all' ? 'saved' : filter} searches</h3><p>${filter === 'all' ? 'Create a search to start your house hunt.' : 'Your searches will appear here.'}</p><button class="secondary-button" data-add-search>${icon('plus')} New search</button></div>`}</div></section>
@@ -120,20 +159,19 @@ function mainContent() {
     <div class="quiet-footer">${icon('leaf')} A little less refreshing. A little closer to home.<span>Made for house hunting in Latvia.</span></div>`;
 }
 function render() {
-  app.innerHTML = `<aside class="sidebar"><a href="#" class="brand" aria-label="House Monitor home"><span class="brand-mark">${icon('house')}</span><span>house<span class="brand-light">monitor</span><small>FIND YOUR PLACE.</small></span></a><div class="workspace-label">WORKSPACE</div><nav>${[{ id: 'searches', icon: 'layout-grid', label: 'My searches' }, { id: 'listings', icon: 'house', label: 'Recent listings' }, { id: 'activity', icon: 'activity', label: 'Activity' }].map(item => `<button data-nav="${item.id}" class="nav-item ${view === item.id ? 'selected' : ''}">${icon(item.icon)}<span>${item.label}</span>${item.id === 'searches' ? `<span class="nav-count">${searches.length}</span>` : item.id === 'listings' ? '<span class="tiny-dot"></span>' : ''}</button>`).join('')}<div class="nav-divider"></div><button data-nav="settings" class="nav-item ${view === 'settings' ? 'selected' : ''}">${icon('settings-2')}<span>Settings</span></button></nav><div class="sidebar-bottom"><div class="latvia-mark"><span></span><span></span><span></span></div><strong>A home, somewhere in Latvia.</strong><p>We’ll help you find it.</p><div class="profile"><div class="profile-avatar">A</div><div><strong>My workspace</strong><small>Personal account</small></div><button class="icon-button" data-nav="settings" title="Account settings" aria-label="Account settings">${icon('chevrons-up-down')}</button></div></div></aside>
-    <div class="workspace"><header class="topbar"><div class="breadcrumb">Workspace ${icon('chevron-right')} <strong>${({ searches: 'My searches', listings: 'Recent listings', activity: 'Activity', settings: 'Settings' })[view]}</strong></div><div class="topbar-right"><span class="timezone">${icon('map-pin')} Latvia <span>·</span> EET</span><span class="topbar-divider"></span><button class="telegram-status" data-nav="settings">${icon('send')} Telegram <span>Not connected</span></button><button class="mobile-add icon-button" data-add-search aria-label="New search">${icon('plus')}</button></div></header><div class="page-layout"><main>${mainContent()}</main>${telegramPreview()}</div></div>`;
+  const openHistories = new Set([...app.querySelectorAll('.listing-card')].filter(card => card.querySelector('.price-history')?.open).map(card => card.querySelector('[data-listing]').dataset.listing));
+  app.innerHTML = `<aside class="sidebar"><a href="#" class="brand" aria-label="House Monitor home"><span class="brand-mark">${icon('house')}</span><span>house<span class="brand-light">monitor</span><small>FIND YOUR PLACE.</small></span></a><div class="workspace-label">WORKSPACE</div><nav>${[{ id: 'listings', icon: 'house', label: 'Recent listings' }, { id: 'activity', icon: 'activity', label: 'Activity' }].map(item => `<button data-nav="${item.id}" class="nav-item ${view === item.id ? 'selected' : ''}">${icon(item.icon)}<span>${item.label}</span>${item.id === 'listings' ? '<span class="tiny-dot"></span>' : ''}</button>`).join('')}<div class="nav-divider"></div><button data-nav="settings" class="nav-item ${view === 'settings' ? 'selected' : ''}">${icon('settings-2')}<span>Settings</span></button></nav><div class="sidebar-bottom"><div class="latvia-mark"><span></span><span></span><span></span></div><strong>A home, somewhere in Latvia.</strong><p>We’ll help you find it.</p><div class="profile"><div class="profile-avatar">A</div><div><strong>My workspace</strong><small>Personal account</small></div><button class="icon-button" data-nav="settings" title="Account settings" aria-label="Account settings">${icon('chevrons-up-down')}</button></div></div></aside>
+    <div class="workspace"><header class="topbar"><div class="breadcrumb">Workspace ${icon('chevron-right')} <strong>${({ listings: 'Recent listings', activity: 'Activity', settings: 'Settings' })[view]}</strong></div><div class="topbar-right"><span class="timezone">${icon('map-pin')} Latvia <span>·</span> EET</span><span class="topbar-divider"></span><button class="telegram-status" data-nav="settings">${icon('send')} Telegram <span>Not connected</span></button></div></header><div class="page-layout"><main>${mainContent()}</main>${telegramPreview()}</div></div>`;
   app.querySelectorAll('.nav-item[data-nav]').forEach(button => {
     const label = { searches: 'My searches', listings: 'Recent listings', activity: 'Activity', settings: 'Settings' }[button.dataset.nav];
     button.setAttribute('aria-label', label);
     button.title = label;
   });
-  const telegramStatus = app.querySelector('.telegram-status>span');
-  if (telegramStatus) telegramStatus.textContent = backendStatus.telegram.ready ? 'Connected' : 'Not connected';
-  app.querySelectorAll('[data-scan]').forEach(button => {
-    if (backendStatus.scanning) button.textContent = checkingLabel();
-    button.disabled = Boolean(backendStatus.scanning);
-    button.title = backendStatus.scanning ? 'Each source check has a four-minute deadline.' : backendStatus.next_scan ? `Next check: ${new Date(backendStatus.next_scan * 1000).toLocaleString()}` : 'Check sources now';
+  app.querySelectorAll('.listing-card').forEach(card => {
+    const history = card.querySelector('.price-history');
+    if (history && openHistories.has(card.querySelector('[data-listing]').dataset.listing)) history.open = true;
   });
+  updateProgress();
   if (view === 'activity') {
     const summary = app.querySelector('.page-heading p');
     if (backendStatus.scanning) summary.textContent = checkingLabel();
@@ -150,6 +188,23 @@ function render() {
     app.querySelector('main').prepend(notice);
   }
   drawIcons();
+}
+
+function updateProgress() {
+  const telegramStatus = app.querySelector('.telegram-status>span');
+  if (telegramStatus) telegramStatus.textContent = backendStatus.telegram.ready ? 'Connected' : 'Not connected';
+  app.querySelectorAll('[data-scan]').forEach(button => {
+    const label = backendStatus.scanning ? checkingLabel() : 'Check now';
+    if (button.textContent.trim() !== label) button.textContent = label;
+    button.disabled = Boolean(backendStatus.scanning);
+    button.title = backendStatus.scanning ? 'Each source check has a four-minute deadline.' : backendStatus.next_scan ? `Next check: ${new Date(backendStatus.next_scan * 1000).toLocaleString()}` : 'Check sources now';
+  });
+  const monitorStatus = app.querySelector('.demo-status');
+  if (monitorStatus) monitorStatus.innerHTML = `<span></span>${backendStatus.scanning ? 'Scanning' : 'Monitoring'}`;
+  app.querySelectorAll('.source-note > div').forEach(row => {
+    const state = backendStatus.sources[row.querySelector('strong')?.textContent];
+    if (state) row.querySelector('.source-state').textContent = state.status.replaceAll('_', ' ');
+  });
 }
 
 let locationGroups = {};
@@ -231,14 +286,16 @@ dialog.addEventListener('input', event => { if (event.target.id === 'location-qu
 app.addEventListener('click', async event => {
   const button = event.target.closest('button, a.brand'); if (!button) return;
   try {
-  if (button.matches('.brand')) { event.preventDefault(); view = 'searches'; render(); }
-  if (button.dataset.nav) { view = button.dataset.nav; selectedSearch = null; render(); }
+  if (button.matches('.brand')) { event.preventDefault(); view = 'listings'; selectedSearch = null; selectedLocation = null; render(); }
+  if (button.dataset.nav) { view = button.dataset.nav; selectedSearch = null; selectedLocation = null; render(); }
   if (button.id === 'new-search' || button.hasAttribute('data-add-search')) openSearch();
   if (button.dataset.edit) openSearch(Number(button.dataset.edit));
   if (button.dataset.filter) { filter = button.dataset.filter; render(); }
   if (button.dataset.toggle) { const search = searches.find(item => item.id === Number(button.dataset.toggle)); await api(`/api/searches/${search.id}`, { method: 'PUT', body: JSON.stringify({ ...search, active: !search.active }) }); await refresh(); toast(`${search.name} ${search.active ? 'paused' : 'resumed'}.`); }
   if (button.dataset.delete) { const search = searches.find(item => item.id === Number(button.dataset.delete)); dialog.innerHTML = `<div class="dialog-header"><h2 id="dialog-title">Delete search?</h2><button class="icon-button" data-close-dialog aria-label="Close">${icon('x')}</button></div><div class="wizard-content"><p>“${escape(search.name)}” will be removed from this workspace. Listing history is retained.</p></div><div class="dialog-footer"><button class="secondary-button" data-close-dialog>Keep search</button><button class="danger-button" id="confirm-delete">Delete search</button></div>`; drawIcons(); dialog.showModal(); dialog.querySelector('#confirm-delete').onclick = async () => { try { await api(`/api/searches/${search.id}`, { method: 'DELETE' }); dialog.close(); await refresh(); toast('Search deleted.'); } catch (error) { toast(error.message); } }; }
-  if (button.dataset.matches) { selectedSearch = Number(button.dataset.matches); view = 'listings'; render(); }
+  if (button.dataset.matches) { selectedSearch = Number(button.dataset.matches); selectedLocation = null; view = 'listings'; render(); }
+  if (button.dataset.locationFilter) { selectedLocation = button.dataset.locationFilter; view = 'listings'; render(); }
+  if (button.hasAttribute('data-clear-location')) { selectedLocation = null; render(); }
   if (button.id === 'view-listings' || button.id === 'show-all-listings') { view = 'listings'; selectedSearch = null; render(); }
   if (button.dataset.listing) { selectedListing = button.dataset.listing; render(); if (window.innerWidth < 1100) document.querySelector('.preview-panel').scrollIntoView({ behavior: 'smooth', block: 'start' }); }
   if (button.id === 'notifications-toggle') { await api('/api/settings', { method: 'PUT', body: JSON.stringify({ notifications_enabled: !notificationEnabled }) }); await refresh(); toast(`Notifications ${notificationEnabled ? 'enabled' : 'disabled'}.`); }

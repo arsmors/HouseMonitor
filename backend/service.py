@@ -10,7 +10,7 @@ import aiohttp
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramNetworkError, TelegramRetryAfter, TelegramServerError
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from backend.sources import City24Adapter, LatioAdapter, PublicHTTP, SSAdapter, USER_AGENT, match, now
+from backend.sources import RECENT_LOCATION_IDS, City24Adapter, LatioAdapter, PublicHTTP, RentInRigaAdapter, SSAdapter, USER_AGENT, is_sale_listing, match, now
 from backend.store import Store
 
 LOGGER = logging.getLogger(__name__)
@@ -38,12 +38,13 @@ def notification_text(listing: dict, search: dict) -> str:
 class Monitor:
     """Coordinate source scans without overlaps and isolate source failures."""
 
-    def __init__(self, store: Store, interval: int = DEFAULT_INTERVAL, city24: bool = True, latio: bool = False):
+    def __init__(self, store: Store, interval: int = DEFAULT_INTERVAL, city24: bool = True, latio: bool = False, rentinriga: bool = True):
         """Configure independent sources with an hourly default schedule."""
         self.store = store
         self.interval = max(interval, 300)
         self.city24_enabled = city24
         self.latio_enabled = latio
+        self.rentinriga_enabled = rentinriga
         self.bot = None
         self.owner_id = None
         self.bot_username = None
@@ -124,7 +125,7 @@ class Monitor:
             self.next_scan = time.time() + self.interval
             self.store.set_setting("next_scan", self.next_scan)
             try:
-                await asyncio.wait_for(self.cycle(), timeout=SOURCE_TIMEOUT * 3 + 30)
+                await asyncio.wait_for(self.cycle(), timeout=SOURCE_TIMEOUT * 4 + 30)
             except asyncio.CancelledError:
                 raise
             except Exception as error:
@@ -158,21 +159,29 @@ class Monitor:
 
     async def cycle(self):
         """Collect SS.lv first, then independent additional sources."""
-        active = [search for search in self.store.searches() if search["active"]]
+        searches = self.store.searches()
+        active = [search for search in searches if search["active"]]
+        if not searches:
+            active = [{"locations": RECENT_LOCATION_IDS, "min": None, "max": None}]
         if not active:
             self.store.event("Monitoring idle: all searches are paused")
             return
         city_locations = None if any(not search["locations"] for search in active) else sorted({location for search in active for location in search["locations"]})
         city_scope = "City24.lv" if city_locations is None else "City24.lv:" + "|".join(city_locations)
-        for source in ["SS.lv", "City24.lv", "Latio.lv"]:
+        rent_scope = "RentInRiga.lv" if city_locations is None else "RentInRiga.lv:" + "|".join(city_locations)
+        for source in ["SS.lv", "City24.lv", "RentInRiga.lv", "Latio.lv"]:
             if source == "City24.lv" and not self.city24_enabled:
+                self.store.source_state(source, {"status": "disabled", "error": "Disabled in configuration"})
+                continue
+            if source == "RentInRiga.lv" and not self.rentinriga_enabled:
                 self.store.source_state(source, {"status": "disabled", "error": "Disabled in configuration"})
                 continue
             if source == "Latio.lv" and not self.latio_enabled:
                 self.store.source_state(source, {"status": "permission_required", "error": "Written reuse permission required. Set LATIO_PERMISSION_CONFIRMED=true only after obtaining permission."})
                 continue
             previous = self.store.status()["sources"].get(source, {})
-            if previous.get("retry_at", 0) > time.time() and not (source == "City24.lv" and previous.get("scope") != city_scope):
+            changed_scope = source == "City24.lv" and previous.get("scope") != city_scope or source == "RentInRiga.lv" and previous.get("scope") != rent_scope
+            if previous.get("retry_at", 0) > time.time() and not changed_scope:
                 continue
             started = time.monotonic()
             self.store.source_state(source, {**previous, "status": "scanning", "started_at": now(), "timeout_seconds": SOURCE_TIMEOUT})
@@ -190,6 +199,14 @@ class Monitor:
                         cached[city_scope] = adapter.search_urls
                         self.store.set_setting("city24_search_urls", cached)
                     detail = {"scope": city_scope, "pages_checked": adapter.pages_checked, "search_urls": adapter.search_urls}
+                elif source == "RentInRiga.lv":
+                    cached = self.store.setting("rentinriga_search_urls", {})
+                    adapter = RentInRigaAdapter(self.http, self.ss.locations, city_locations, cached.get(rent_scope))
+                    listings = await asyncio.wait_for(adapter.collect(), timeout=SOURCE_TIMEOUT)
+                    totals = self.store.ingest(rent_scope, listings)
+                    cached[rent_scope] = adapter.search_urls
+                    self.store.set_setting("rentinriga_search_urls", cached)
+                    detail = {"scope": rent_scope, "pages_checked": adapter.pages_checked, "search_urls": adapter.search_urls}
                 else:
                     adapter = LatioAdapter(self.http, self.ss.locations)
                     totals = self.store.ingest(source, await asyncio.wait_for(adapter.collect(), timeout=SOURCE_TIMEOUT))
@@ -205,6 +222,8 @@ class Monitor:
                 state = {**previous, "status": "error", "error": reason, "failures": failures, "retry_at": time.time() + min(self.interval * 2 ** min(failures - 1, 6), max(self.interval, 3600))}
                 if source == "City24.lv":
                     state["scope"] = city_scope
+                elif source == "RentInRiga.lv":
+                    state["scope"] = rent_scope
                 self.store.source_state(source, state)
                 self.store.event(f"{source}: {reason}")
                 LOGGER.warning("%s collection failed: %s", source, type(error).__name__)
@@ -263,6 +282,9 @@ class Monitor:
                 continue
             import json
             listing = json.loads(row[0])
+            if not is_sale_listing(listing):
+                self.store.delivery(job["id"], "cancelled", "Buyer request is not a sale listing")
+                continue
             search = searches.get(job["search_id"])
             if not search or not match(listing, search):
                 self.store.delivery(job["id"], "cancelled", "No longer matches edited search")

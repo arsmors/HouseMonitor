@@ -2,6 +2,8 @@
 
 import asyncio
 import base64
+import hashlib
+import json
 import math
 import re
 import time
@@ -9,7 +11,7 @@ import unicodedata
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import parse_qs, urlencode, urljoin, urlsplit, urlunsplit
 from urllib.robotparser import RobotFileParser
 
 import aiohttp
@@ -17,8 +19,9 @@ import feedparser
 from bs4 import BeautifulSoup
 
 SS_ROOT = "https://www.ss.lv/lv/real-estate/homes-summer-residences/"
-DEFAULT_PATHS = ["riga-region/carnikavas-nov", "riga/vecaki", "riga/mangalsala", "riga/vecdaugava"]
-DEFAULT_LABELS = ["Carnikavas novads", "Vecāķi", "Mangaļsala", "Vecdaugava"]
+DEFAULT_PATHS = ["riga-region/carnikavas-nov", "riga/vecaki", "riga/mangalsala", "riga/vecdaugava", "riga/trisciems", "riga/jaunciems"]
+DEFAULT_LABELS = ["Carnikavas novads", "Vecāķi", "Mangaļsala", "Vecdaugava", "Trīsciems", "Jaunciems"]
+RECENT_LOCATION_IDS = ["ss:riga/vecdaugava", "ss:riga/vecaki", "ss:riga-region/carnikavas-nov", "ss:riga/trisciems", "ss:riga/jaunciems"]
 CITY24_AREA_SEARCHES = {
     "ss:riga-region/carnikavas-nov": "https://www.city24.lv/real-estate-search/houses-for-sale/adazu-nov-carnikavas-pag/id=245490-parish",
     "ss:riga/mangalsala": "https://www.city24.lv/real-estate-search/houses-for-sale/riga-mangalu-pussala/id=270744-district",
@@ -26,6 +29,7 @@ CITY24_AREA_SEARCHES = {
     "ss:riga/vecdaugava": "https://www.city24.lv/real-estate-search/houses-for-sale/riga-vecdaugava/id=270696-district",
 }
 USER_AGENT = "HouseMonitor/1.0 (personal property notifications)"
+BUYER_INTENT = re.compile(r"\b(?:pērku|pērkam|nopirkšu|nopirksim|куплю|купим)\b", re.IGNORECASE)
 
 
 def now() -> str:
@@ -66,10 +70,36 @@ class Listing:
     area_status: str
     image: str | None = None
     published_at: str | None = None
+    address: str | None = None
 
     def record(self) -> dict:
         """Serialize the listing without losing parser evidence."""
         return asdict(self)
+
+
+def is_sale_listing(listing: dict) -> bool:
+    """Reject SS.lv buyer requests, which can appear in its sale-category feed."""
+    if listing.get("source") != "SS.lv":
+        return True
+    return not any(BUYER_INTENT.search(str(listing.get(field, ""))) for field in ("title", "price"))
+
+
+def relist_key(listing: dict) -> str | None:
+    """Match relists by exact source/address/location/area; otherwise use the ad ID."""
+    address = re.sub(r"\s+", " ", normalized(str(listing.get("address") or "")))
+    location = re.sub(r"\s+", " ", normalized(str(listing.get("location") or "")))
+    area = listing.get("area")
+    source = listing.get("source")
+    if not source:
+        return None
+    if address and location and isinstance(area, (int, float)) and not isinstance(area, bool) and area > 0:
+        identity = json.dumps([source, address, location, area], ensure_ascii=False, separators=(",", ":"))
+    else:
+        identifier = listing.get("id")
+        if not identifier:
+            return None
+        identity = json.dumps([source, identifier], ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
 def parse_ss(html: str, page_url: str, locations: dict[str, dict]) -> list[Listing]:
@@ -82,6 +112,7 @@ def parse_ss(html: str, page_url: str, locations: dict[str, dict]) -> list[Listi
     area_index = next((index for index, value in enumerate(headers) if value in {"m²", "m2"}), None)
     if area_index is None:
         raise ValueError("SS.lv house-area column missing")
+    address_index = next((index for index, value in enumerate(headers) if value.casefold() in {"iela", "adrese"}), None)
     result = []
     for row in soup.select('tr[id^="tr_"]'):
         anchor = row.select_one("a.am[href]")
@@ -102,9 +133,12 @@ def parse_ss(html: str, page_url: str, locations: dict[str, dict]) -> list[Listi
         area, status = parse_area(raw)
         image = row.select_one("img.isfoto")
         identifier = urlsplit(url).path.rsplit("/", 1)[-1].removesuffix(".html")
-        result.append(Listing("ss:" + identifier, "SS.lv", anchor.get_text(" ", strip=True), url,
-                              cells[-1].get_text(" ", strip=True), ", ".join(reversed(labels)) or path,
-                              location_ids, area, raw, status, urljoin(url, image["src"]) if image else None))
+        listing = Listing("ss:" + identifier, "SS.lv", anchor.get_text(" ", strip=True), url,
+                          cells[-1].get_text(" ", strip=True), ", ".join(reversed(labels)) or path,
+                          location_ids, area, raw, status, urljoin(url, image["src"]) if image else None,
+                          address=cells[address_index].get_text(" ", strip=True) if address_index is not None else None)
+        if is_sale_listing(listing.record()):
+            result.append(listing)
     return result
 
 
@@ -145,7 +179,7 @@ class PublicHTTP:
     async def get(self, url: str) -> str:
         """Fetch only known source hosts and stop on forbidden/challenge responses."""
         parsed = urlsplit(url)
-        if parsed.scheme != "https" or parsed.hostname not in {"www.ss.lv", "www.ss.com", "www.city24.lv", "latio.lv"}:
+        if parsed.scheme != "https" or parsed.hostname not in {"www.ss.lv", "www.ss.com", "www.city24.lv", "latio.lv", "www.rentinriga.lv"}:
             raise ValueError("Source URL is not allowed")
         origin = f"https://{parsed.hostname}"
         if origin not in self.robots:
@@ -298,7 +332,8 @@ def parse_city24(html: str, locations: dict[str, dict]) -> list[Listing]:
         slogan = card.select_one(".object__slogan")
         result.append(Listing("city24:" + identifier, "City24.lv", slogan.get_text(" ", strip=True) if slogan else location,
                               url, price_match.group(1).strip() if price_match else "Price on request", location,
-                              location_ids_for_text(location, locations), area, raw, status, image_url))
+                              location_ids_for_text(location, locations), area, raw, status, image_url,
+                              address=address.get_text(" ", strip=True) if address else None))
     if not result:
         raise ValueError("City24 public house-sale cards missing or changed")
     return result
@@ -469,6 +504,192 @@ class City24Adapter:
             await route.continue_()
 
 
+def parse_rentinriga(html: str, locations: dict[str, dict]) -> list[Listing]:
+    """Read rendered house-sale cards using labelled building area, never land area."""
+    soup = BeautifulSoup(html, "html.parser")
+    result = {}
+    for card in soup.select("a.real-estate-item__link[href]"):
+        url = urljoin("https://www.rentinriga.lv", card["href"]).split("?", 1)[0]
+        parsed = urlsplit(url)
+        if parsed.scheme != "https" or parsed.hostname != "www.rentinriga.lv" or not re.fullmatch(r"/lv/maju-pardosana/[^/]+/\d+", parsed.path):
+            continue
+        name = card.select_one(".real-estate-item__name")
+        price = card.select_one(".real-estate-item__price")
+        if not name:
+            raise ValueError("RentInRiga house-sale card is missing its address")
+        title = name.get_text(" ", strip=True)
+        location = title.split("/", 1)[-1].strip()
+        raw = ""
+        for field in card.select(".real-estate-item__info-item"):
+            label = field.select_one(".real-estate-item__info-label")
+            value = field.select_one(".real-estate-item__info-value")
+            if label and label.get_text(" ", strip=True).rstrip(":").strip() == "Platība" and value:
+                raw = value.get_text("", strip=True)
+                break
+        area, status = parse_area(raw)
+        image = card.select_one("img[src]")
+        image_url = urljoin(url, image["src"]) if image else None
+        if image_url and urlsplit(image_url).hostname not in {"production-riga.fra1.digitaloceanspaces.com", "www.rentinriga.lv"}:
+            image_url = None
+        time_node = card.select_one("time[datetime]")
+        published = time_node.get("datetime") if time_node else None
+        if published:
+            try:
+                published = datetime.fromisoformat(published.replace("Z", "+00:00")).isoformat()
+            except ValueError:
+                published = None
+        identifier = "rentinriga:" + parsed.path.rsplit("/", 1)[-1]
+        result[identifier] = Listing(identifier, "RentInRiga.lv", title, url,
+                                     price.get_text(" ", strip=True) if price else "Price on request",
+                                     location, location_ids_for_text(location, locations), area, raw, status, image_url, published,
+                                     title.split("/", 1)[0].strip())
+    if not result:
+        heading = soup.select_one("h1")
+        empty = soup.find(string=lambda value: value and "Nav rezultātu ar izvēlētajiem filtriem." in value)
+        if heading and "Pārdod mājas" in heading.get_text(" ", strip=True) and empty:
+            return []
+        raise ValueError("RentInRiga public house-sale cards missing or changed")
+    return list(result.values())
+
+
+class RentInRigaAdapter:
+    """Use public sale-only location searches without private API dependencies."""
+
+    def __init__(self, http: PublicHTTP, locations: dict[str, dict], selected_locations: list[str] | None = None, cached_urls: list[str] | None = None):
+        """Keep selected canonical areas and an optional previously verified search URL."""
+        self.http = http
+        self.locations = locations
+        self.selected_locations = selected_locations
+        self.search_urls = cached_urls if isinstance(cached_urls, list) else []
+        self.pages_checked = 0
+
+    def default_search_urls(self) -> list[str] | None:
+        """Use location IDs obtained from the public RentInRiga filter control."""
+        root = "https://www.rentinriga.lv/lv/maju-pardosana"
+        if self.selected_locations is None:
+            return [root]
+        identifiers = {"ss:riga-region/carnikavas-nov": "20", "ss:riga/vecaki": "709", "ss:riga/mangalsala": "698", "ss:riga/vecdaugava": "710"}
+        if not self.selected_locations or not all(location in identifiers for location in self.selected_locations):
+            return None
+        return [root + "?" + urlencode({"transaction_type": "sales", "object_type": "House", "location_id": identifiers[location]}) for location in dict.fromkeys(self.selected_locations)]
+
+    def valid_search_url(self, url: str) -> bool:
+        """Reject other hosts, rentals, unrelated categories and unscoped cached searches."""
+        parsed = urlsplit(url)
+        query = parse_qs(parsed.query)
+        if parsed.scheme != "https" or parsed.hostname != "www.rentinriga.lv" or parsed.path != "/lv/maju-pardosana" or parsed.fragment:
+            return False
+        if self.selected_locations is None and not query:
+            return True
+        return query.get("transaction_type") == ["sales"] and query.get("object_type") == ["House"] and len(query.get("location_id", [])) == 1 and query["location_id"][0].isdigit() and set(query).issubset({"transaction_type", "object_type", "location_id"})
+
+    async def resolve_searches(self, page) -> list[str]:
+        """Resolve unknown geographic selections only through the public form."""
+        targets = self.search_urls or self.default_search_urls()
+        if targets:
+            if not all(self.valid_search_url(target) for target in targets):
+                raise ValueError("RentInRiga cached house-sale search is invalid")
+            self.search_urls = targets
+            return targets
+        root = "https://www.rentinriga.lv/lv/maju-pardosana"
+        aliases = {"ss:riga-region/carnikavas-nov": "Carnikavas pag.", "ss:riga/mangalsala": "Mangaļu pussala"}
+        targets = []
+        for location in self.selected_locations:
+            response = await page.goto(root, wait_until="domcontentloaded", timeout=45000)
+            if response is None or response.status != 200:
+                raise ValueError("RentInRiga public location picker unavailable")
+            field = page.get_by_role("combobox", name="Atrašanās vieta", exact=True)
+            await field.wait_for(timeout=15000)
+            label = aliases.get(location) or self.locations.get(location, {}).get("label")
+            if not label:
+                raise ValueError("Selected area is missing from the location catalog")
+            await field.fill(label)
+            option = page.locator('[role="option"]:visible').filter(has_text=re.compile("^" + re.escape(label) + "$"))
+            await option.first.wait_for(timeout=15000)
+            if await option.count() != 1:
+                raise ValueError("RentInRiga location is ambiguous; refusing to broaden the search")
+            await option.click()
+            await page.get_by_role("button", name="Rādīt rezultātus", exact=True).click()
+            await page.wait_for_url(lambda url: "location_id=" in url, timeout=15000)
+            target = page.url
+            if not self.valid_search_url(target):
+                raise ValueError("RentInRiga did not retain a valid selected-area house-sale search")
+            targets.append(target)
+        self.search_urls = list(dict.fromkeys(targets))
+        return self.search_urls
+
+    async def rendered_page(self, page) -> str:
+        """Wait for real cards or a verified empty-search message."""
+        await page.wait_for_load_state("networkidle", timeout=20000)
+        cards = page.locator("a.real-estate-item__link")
+        empty = page.get_by_text("Nav rezultātu ar izvēlētajiem filtriem.", exact=True)
+        await cards.or_(empty).first.wait_for(timeout=30000)
+        return await page.content()
+
+    async def collect_search(self, page, target: str) -> list[Listing]:
+        """Traverse only pagination belonging to this verified geographic filter."""
+        policy = self.http.robots["https://www.rentinriga.lv"]
+        if not policy.can_fetch(USER_AGENT, target):
+            raise ValueError("RentInRiga robots.txt disallows the selected location search")
+        response = await page.goto(target, wait_until="domcontentloaded", timeout=45000)
+        if response is None or response.status != 200:
+            raise ValueError("RentInRiga public search unavailable; no bypass attempted")
+        first = await self.rendered_page(page)
+        self.pages_checked += 1
+        result = {listing.id: listing for listing in parse_rentinriga(first, self.locations)}
+        soup = BeautifulSoup(first, "html.parser")
+        parameters = parse_qs(urlsplit(target).query)
+        maximum = 1
+        for anchor in soup.select('a[href*="page="]'):
+            link = urlsplit(urljoin(target, anchor["href"]))
+            query = parse_qs(link.query)
+            number = query.pop("page", [""])[0]
+            if link.hostname == "www.rentinriga.lv" and link.path == urlsplit(target).path and query == parameters and number.isdigit():
+                maximum = max(maximum, int(number))
+        if maximum > 50:
+            raise ValueError("RentInRiga selected-area pagination exceeds safe scan limit")
+        for number in range(2, maximum + 1):
+            parsed = urlsplit(target)
+            query = parse_qs(parsed.query)
+            query["page"] = [str(number)]
+            url = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query, doseq=True), ""))
+            if not policy.can_fetch(USER_AGENT, url):
+                raise ValueError("RentInRiga robots.txt disallows a required result page")
+            await asyncio.sleep(1)
+            response = await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            if response is None or response.status != 200:
+                raise ValueError("RentInRiga result page failed; partial scan discarded")
+            for listing in parse_rentinriga(await self.rendered_page(page), self.locations):
+                result[listing.id] = listing
+            self.pages_checked += 1
+        return list(result.values())
+
+    async def collect(self) -> list[Listing]:
+        """Collect separate area searches and merge duplicate IDs without losing locations."""
+        from playwright.async_api import async_playwright
+
+        root = "https://www.rentinriga.lv/lv/maju-pardosana"
+        targets = self.search_urls or self.default_search_urls() or [root]
+        await self.http.get(targets[0])
+        driver = await async_playwright().start()
+        browser = None
+        try:
+            browser = await driver.chromium.launch(headless=True, args=["--disable-dev-shm-usage"])
+            page = await browser.new_page(user_agent=USER_AGENT)
+            await page.route("**/*", City24Adapter(self.http, self.locations).route)
+            targets = await self.resolve_searches(page)
+            result = {}
+            for index, target in enumerate(targets):
+                if index:
+                    await asyncio.sleep(1)
+                for listing in await self.collect_search(page, target):
+                    if self.selected_locations is None or set(self.selected_locations).intersection(listing.location_ids):
+                        result[listing.id] = listing
+            return list(result.values())
+        finally:
+            await close_browser(browser, driver)
+
+
 def parse_latio(html: str, locations: dict[str, dict]) -> list[Listing]:
     """Read house-sale facts from public cards, only when reuse permission is confirmed."""
     soup = BeautifulSoup(html, "html.parser")
@@ -496,7 +717,8 @@ def parse_latio(html: str, locations: dict[str, dict]) -> list[Listing]:
         result.append(Listing("latio:" + urlsplit(url).path.rsplit("/", 1)[-1], "Latio.lv", "House for sale · " + location, url,
                               price.get_text(" ", strip=True) if price else "Price on request", location,
                               location_ids_for_text(location, locations), area, raw, status,
-                              urljoin(url, image["data-src"]) if image else None))
+                              urljoin(url, image["data-src"]) if image else None,
+                              address=next((value for value in addresses if "|" not in value), None)))
     return result
 
 

@@ -155,7 +155,7 @@ class TelegramUI:
                 await message.answer("Source locations unavailable. Try again later; your draft is kept.")
                 return
         if parent == "" and offset == 0:
-            children = [catalog["ss:" + path] for path in ["riga-region/carnikavas-nov", "riga/vecaki", "riga/mangalsala", "riga/vecdaugava"] if "ss:" + path in catalog] + children
+            children = [catalog["ss:" + path] for path in ["riga-region/carnikavas-nov", "riga/vecaki", "riga/mangalsala", "riga/vecdaugava", "riga/trisciems", "riga/jaunciems"] if "ss:" + path in catalog] + children
         rows = []
         for record in children[offset:offset + 8]:
             token = hashlib.sha256(record["id"].encode()).hexdigest()[:24]

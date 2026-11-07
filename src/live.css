@@ -32,7 +32,57 @@
   overflow-wrap: anywhere;
 }
 .listing-price { flex-wrap: wrap; line-height: 1.7; }
+.relisted-badge { width: fit-content; padding: 3px 7px; margin-bottom: 8px; border-radius: 3px; background: #edf3eb; color: #285641; font-size: 11px; font-weight: 600; }
+.price-history { margin: -4px 0 8px; color: #5e7254; font-size: 11px; }
+.price-history summary { width: fit-content; cursor: pointer; text-underline-offset: 2px; }
+.price-history ol { display: grid; gap: 5px; padding: 8px 0 0 16px; margin: 0; }
+.price-history li { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px; }
+.price-history time { color: #697468; }
+.price-history strong { color: #334b36; font-weight: 600; }
+.price-history li > span { padding: 1px 5px; border-radius: 3px; background: #edf3eb; font-size: 9px; }
 .listing-location { overflow-wrap: anywhere; }
+.listing-location > svg { flex: 0 0 11px; }
+.location-filter-trigger {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 3px;
+  margin: -2px -3px;
+  border-radius: 3px;
+  color: #5e7254;
+  font-size: inherit;
+  line-height: inherit;
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: #c3d0ba;
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+}
+.location-filter-trigger:hover,
+.location-filter-trigger[aria-pressed="true"] { color: #285641; background: #edf3eb; text-decoration-color: currentColor; }
+.location-filter-tags {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin: -10px 0 24px;
+}
+.location-filter-caption { margin-right: 3px; color: #697468; font-size: 11px; font-weight: 600; }
+.location-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 5px 9px;
+  border: 1px solid #dfe5dc;
+  border-radius: 4px;
+  background: #fff;
+  color: #53614f;
+  font-size: 11px;
+}
+.location-tag:hover { border-color: #9bb28e; }
+.location-tag[aria-pressed="true"] { border-color: #78916c; background: #edf3eb; color: #285641; font-weight: 600; }
+.location-tag-count { color: #7d827e; font-size: 10px; font-weight: 500; }
+.location-tag[aria-pressed="true"] .location-tag-count { color: #285641; }
 .listing-image { display: block; text-decoration: none; }
 .listing-title-link { color: inherit; text-decoration: none; }
 .listing-title-link:hover { text-decoration: underline; }

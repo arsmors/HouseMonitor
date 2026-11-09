@@ -175,7 +175,7 @@ def create_app(store: Store | None = None, start_tasks: bool = True) -> web.Appl
     app = web.Application(middlewares=[security], client_max_size=32 * 1024)
     app["web_password"] = os.getenv("WEB_PASSWORD", "")
     app["public_access"] = public_access
-    app["monitor"] = Monitor(store or Store.from_environment(str(ROOT / "data" / "monitor.db"), recover=not scheduled, require_remote=scheduled),
+    app["monitor"] = Monitor(store or Store.from_environment(str(ROOT / "data" / "monitor.db"), recover=not scheduled, require_remote=scheduled, initialize=not scheduled),
                              int(os.getenv("POLL_INTERVAL", str(DEFAULT_INTERVAL))), os.getenv("CITY24_ENABLED", "true").lower() == "true",
                              os.getenv("LATIO_PERMISSION_CONFIRMED", "false").lower() == "true", os.getenv("RENTINRIGA_ENABLED", "true").lower() == "true")
     app["monitor"].scheduled = scheduled

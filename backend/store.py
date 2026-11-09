@@ -13,11 +13,14 @@ from backend.sources import DEFAULT_LABELS, DEFAULT_PATHS, Listing, is_sale_list
 class Store:
     """Persistence with short, atomic transactions for SQLite or hosted libSQL."""
 
-    def __init__(self, path: str, *, auth_token: str | None = None, recover: bool = True):
+    def __init__(self, path: str, *, auth_token: str | None = None, recover: bool = True, initialize: bool = True):
         """Create the database and seed real default category IDs once."""
         self.db = connect(path, auth_token)
         try:
-            self._initialize(recover)
+            if initialize:
+                self._initialize(recover)
+            elif not self.setting("initialized", False):
+                raise ValueError("Run the scheduled collector to initialize the shared database before starting the dashboard")
         except Exception:
             self.db.close()
             raise
@@ -72,15 +75,15 @@ class Store:
         self._backfill_price_history()
 
     @classmethod
-    def from_environment(cls, default_path: str, *, recover: bool = True, require_remote: bool = False):
+    def from_environment(cls, default_path: str, *, recover: bool = True, require_remote: bool = False, initialize: bool = True):
         """Fail explicitly rather than losing deployed data in a local file."""
         url = os.getenv("TURSO_DATABASE_URL", "").strip()
         token = os.getenv("TURSO_AUTH_TOKEN", "").strip()
         if url or token or require_remote:
             if not url.startswith("libsql://") or not token:
                 raise ValueError("Set TURSO_DATABASE_URL (libsql://) and TURSO_AUTH_TOKEN for a hosted libSQL database")
-            return cls(url, auth_token=token, recover=recover)
-        return cls(os.getenv("DATABASE_PATH", default_path), recover=recover)
+            return cls(url, auth_token=token, recover=recover, initialize=initialize)
+        return cls(os.getenv("DATABASE_PATH", default_path), recover=recover, initialize=initialize)
 
     def close(self):
         """Release the SQLite handle on service shutdown."""

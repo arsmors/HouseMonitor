@@ -34,6 +34,8 @@ Create a **libSQL-engine** database in [Turso](https://turso.tech/), not the new
 
 Local-only WAL and busy-timeout pragmas are not sent to Turso. Full-size photo URLs are cached in the shared database so dashboard restarts do not reset photo enrichment.
 
+Run the collector once before opening a fresh deployment. The collector initializes and maintains the schema; scheduled dashboard cold starts only open the existing database to avoid schema-write contention and startup timeouts.
+
 To keep existing local history, stop the local backend and create a consistent backup with SQLite's backup API:
 
 ```powershell

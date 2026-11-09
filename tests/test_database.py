@@ -85,6 +85,18 @@ class RemoteStoreTests(test_store.StoreTests):
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_dashboard_open_does_not_repeat_schema_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "monitor.db")
+            Store(path).close()
+            with patch.object(Store, "_initialize") as initialize:
+                store = Store(path, recover=False, initialize=False)
+                try:
+                    self.assertTrue(store.setting("initialized"))
+                    initialize.assert_not_called()
+                finally:
+                    store.close()
+
     def test_remote_bulk_parameters_are_a_list(self):
         client = Mock()
         client.__enter__ = Mock(return_value=client)

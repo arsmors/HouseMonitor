@@ -74,7 +74,7 @@ For an intentionally public dashboard, set `PUBLIC_ACCESS=true` and remove `WEB_
 
 ### 3. Enable hourly collection
 
-In this GitHub repository's **Settings > Secrets and variables > Actions**, add repository secrets:
+The collector job uses the GitHub environment named `prod`. Under **Settings > Environments > prod**, add environment secrets (repository-level Actions secrets also work):
 
 - `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`: the same database used by Vercel.
 - Optional `TELEGRAM_BOT_TOKEN` and `TELEGRAM_OWNER_ID`: set both, or leave both absent.

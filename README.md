@@ -66,7 +66,9 @@ Set these **server-side Production environment variables** in Vercel before depl
 
 Use the same `PORT` in Vercel project settings and the container. Do not prefix secrets with `VITE_`: those variables would be exposed to browsers. Telegram credentials are needed only in Actions, not Vercel. Use a separate database and password for Preview deployments if you enable them; never point previews at production data.
 
-Deploy, open the HTTPS Vercel URL, and sign in as `owner` using `WEB_PASSWORD`. A scheduled dashboard fails startup if the remote database credentials or password are missing; it never silently writes to temporary local storage.
+Deploy, open the HTTPS Vercel URL, and sign in as `owner` using `WEB_PASSWORD`. A scheduled dashboard fails startup if the remote database credentials are missing or neither password protection nor explicit public access is configured; it never silently writes to temporary local storage.
+
+For an intentionally public dashboard, set `PUBLIC_ACCESS=true` and remove `WEB_PASSWORD` from Vercel. Anyone can then view listings, create/edit/delete searches, and change notification settings. Cross-origin mutation checks remain enabled but are not authentication. A configured `WEB_PASSWORD` still takes precedence over public access. Private access remains the default.
 
 ### 3. Enable hourly collection
 

@@ -54,9 +54,42 @@ class ScheduledTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.monitor.trigger())
 
     def test_scheduled_dashboard_requires_password(self):
-        with patch.dict(os.environ, {"MONITOR_MODE": "scheduled", "WEB_PASSWORD": ""}):
+        with patch.dict(os.environ, {"MONITOR_MODE": "scheduled", "WEB_PASSWORD": "", "PUBLIC_ACCESS": "false"}):
             with self.assertRaisesRegex(ValueError, "WEB_PASSWORD"):
                 create_app(self.store)
+
+    async def test_public_dashboard_allows_remote_reads_and_changes(self):
+        with patch.dict(os.environ, {"MONITOR_MODE": "scheduled", "WEB_PASSWORD": "", "PUBLIC_ACCESS": "true"}):
+            client = TestClient(TestServer(create_app(self.store, start_tasks=False)))
+        await client.start_server()
+        try:
+            headers = {"Host": "monitor.example", "X-House-Monitor": "1", "Origin": "https://monitor.example"}
+            response = await client.get("/api/state", headers=headers)
+            self.assertEqual(response.status, 200)
+            response = await client.put("/api/settings", json={"notifications_enabled": False}, headers=headers)
+            self.assertEqual(response.status, 200)
+            self.assertFalse(self.store.setting("notifications_enabled"))
+            response = await client.post("/api/searches", json={"name": "Public search", "locations": []}, headers=headers)
+            self.assertEqual(response.status, 201)
+            identifier = (await response.json())["id"]
+            response = await client.delete(f"/api/searches/{identifier}", headers=headers)
+            self.assertEqual(response.status, 200)
+            response = await client.put("/api/settings", json={"notifications_enabled": True}, headers={**headers, "Origin": "https://evil.example"})
+            self.assertEqual(response.status, 403)
+            response = await client.put("/api/settings", json={"notifications_enabled": True}, headers={"Host": "monitor.example"})
+            self.assertEqual(response.status, 403)
+        finally:
+            await client.close()
+
+    async def test_public_flag_does_not_override_configured_password(self):
+        with patch.dict(os.environ, {"MONITOR_MODE": "scheduled", "WEB_PASSWORD": "test-password", "PUBLIC_ACCESS": "true"}):
+            client = TestClient(TestServer(create_app(self.store, start_tasks=False)))
+        await client.start_server()
+        try:
+            response = await client.get("/api/state", headers={"Host": "monitor.example"})
+            self.assertEqual(response.status, 401)
+        finally:
+            await client.close()
 
     async def test_one_run_closes_resources_and_releases_lease(self):
         with (patch("backend.scheduled.Store.from_environment", return_value=self.store) as storage,

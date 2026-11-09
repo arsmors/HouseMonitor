@@ -26,7 +26,7 @@ async def security(request: web.Request, handler):
     """Protect local access, optional remote basic authentication, and mutation origins."""
     password = request.app["web_password"]
     hostname = request.host.split(":", 1)[0].lower()
-    if not password and (request.remote not in {"127.0.0.1", "::1", None} or hostname not in {"localhost", "127.0.0.1", "[::1]"}):
+    if not password and not request.app["public_access"] and (request.remote not in {"127.0.0.1", "::1", None} or hostname not in {"localhost", "127.0.0.1", "[::1]"}):
         return web.json_response({"error": "Remote access requires WEB_PASSWORD"}, status=403)
     local_healthcheck = request.path == "/api/health" and request.remote in {"127.0.0.1", "::1"}
     if password and not local_healthcheck:
@@ -160,10 +160,12 @@ def create_app(store: Store | None = None, start_tasks: bool = True) -> web.Appl
     scheduled = os.getenv("MONITOR_MODE", "continuous") == "scheduled"
     if os.getenv("MONITOR_MODE", "continuous") not in {"continuous", "scheduled"}:
         raise ValueError("MONITOR_MODE must be continuous or scheduled")
-    if scheduled and not os.getenv("WEB_PASSWORD"):
-        raise ValueError("WEB_PASSWORD is required for the scheduled dashboard")
+    public_access = os.getenv("PUBLIC_ACCESS", "false").lower() == "true"
+    if scheduled and not os.getenv("WEB_PASSWORD") and not public_access:
+        raise ValueError("WEB_PASSWORD is required unless PUBLIC_ACCESS=true")
     app = web.Application(middlewares=[security], client_max_size=32 * 1024)
     app["web_password"] = os.getenv("WEB_PASSWORD", "")
+    app["public_access"] = public_access
     app["monitor"] = Monitor(store or Store.from_environment(str(ROOT / "data" / "monitor.db"), recover=not scheduled, require_remote=scheduled),
                              int(os.getenv("POLL_INTERVAL", str(DEFAULT_INTERVAL))), os.getenv("CITY24_ENABLED", "true").lower() == "true",
                              os.getenv("LATIO_PERMISSION_CONFIRMED", "false").lower() == "true", os.getenv("RENTINRIGA_ENABLED", "true").lower() == "true")
@@ -182,6 +184,6 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     load_dotenv(ROOT / ".env")
     host = os.getenv("HOST", "127.0.0.1")
-    if host not in {"127.0.0.1", "localhost", "::1"} and not os.getenv("WEB_PASSWORD"):
-        raise SystemExit("Set WEB_PASSWORD before binding the dashboard to a non-loopback interface")
+    if host not in {"127.0.0.1", "localhost", "::1"} and not os.getenv("WEB_PASSWORD") and os.getenv("PUBLIC_ACCESS", "false").lower() != "true":
+        raise SystemExit("Set WEB_PASSWORD or explicitly set PUBLIC_ACCESS=true before binding to a non-loopback interface")
     web.run_app(create_app(), host=host, port=int(os.getenv("PORT", "8787")), access_log=None)

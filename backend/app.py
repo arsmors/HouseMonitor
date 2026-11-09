@@ -19,6 +19,7 @@ from backend.store import Store
 from backend.telegram import run_bot
 
 ROOT = Path(__file__).resolve().parent.parent
+LOGGER = logging.getLogger(__name__)
 
 
 @web.middleware
@@ -123,7 +124,11 @@ async def lifecycle(app: web.Application):
     if token and owner and (not owner.isdigit() or int(owner) <= 0):
         store.close()
         raise ValueError("TELEGRAM_OWNER_ID must be your positive private user ID")
-    await monitor.start()
+    try:
+        await monitor.start()
+    except Exception:
+        LOGGER.exception("Continuous application startup failed")
+        raise
     if token and owner:
         bot_task = asyncio.create_task(run_bot(monitor, token, int(owner)), name="telegram")
     else:
@@ -140,12 +145,16 @@ async def lifecycle(app: web.Application):
 async def scheduled_lifecycle(app: web.Application):
     """Open only on-demand discovery resources; never start collectors in Vercel."""
     monitor = app["monitor"]
-    monitor.session = aiohttp.ClientSession(
-        headers={"User-Agent": USER_AGENT},
-        timeout=aiohttp.ClientTimeout(total=15),
-    )
-    monitor.http = PublicHTTP(monitor.session)
-    monitor.ss = SSAdapter(monitor.http, monitor.store.locations())
+    try:
+        monitor.session = aiohttp.ClientSession(
+            headers={"User-Agent": USER_AGENT},
+            timeout=aiohttp.ClientTimeout(total=15),
+        )
+        monitor.http = PublicHTTP(monitor.session)
+        monitor.ss = SSAdapter(monitor.http, monitor.store.locations())
+    except Exception:
+        LOGGER.exception("Scheduled application startup failed")
+        raise
     try:
         yield
     finally:
@@ -186,4 +195,13 @@ if __name__ == "__main__":
     host = os.getenv("HOST", "127.0.0.1")
     if host not in {"127.0.0.1", "localhost", "::1"} and not os.getenv("WEB_PASSWORD") and os.getenv("PUBLIC_ACCESS", "false").lower() != "true":
         raise SystemExit("Set WEB_PASSWORD or explicitly set PUBLIC_ACCESS=true before binding to a non-loopback interface")
-    web.run_app(create_app(), host=host, port=int(os.getenv("PORT", "8787")), access_log=None)
+    try:
+        app = create_app()
+    except Exception:
+        LOGGER.exception("Application initialization failed")
+        raise
+    try:
+        web.run_app(app, host=host, port=int(os.getenv("PORT", "8787")), access_log=None)
+    except Exception:
+        LOGGER.exception("Application server failed")
+        raise

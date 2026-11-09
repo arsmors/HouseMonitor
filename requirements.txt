@@ -4,3 +4,4 @@ beautifulsoup4>=4.14,<5
 feedparser>=6.0,<7
 python-dotenv>=1.2,<2
 playwright>=1.56,<2
+libsql-client==0.3.1

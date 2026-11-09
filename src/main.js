@@ -175,11 +175,21 @@ function render() {
   if (view === 'activity') {
     const summary = app.querySelector('.page-heading p');
     if (backendStatus.scanning) summary.textContent = checkingLabel();
+    else if (backendStatus.mode === 'scheduled') summary.textContent = 'Hourly checks via GitHub Actions; scheduled runs may be delayed.';
     else if (backendStatus.next_scan) summary.textContent = `Next check: ${new Date(backendStatus.next_scan * 1000).toLocaleString()}`;
   }
   app.querySelectorAll('.setting-row').forEach(row => {
     if (row.querySelector('strong')?.textContent === 'Polling interval') row.querySelector('.neutral-badge').textContent = intervalLabel();
   });
+  if (view === 'settings' && backendStatus.mode === 'scheduled') {
+    const dataRow = [...app.querySelectorAll('.setting-row')].find(row => row.querySelector('strong')?.textContent === 'Searches and listing history');
+    dataRow.querySelector('p').textContent = 'Persistent hosted libSQL database';
+    const manage = document.createElement('button');
+    manage.className = 'secondary-button';
+    manage.dataset.nav = 'searches';
+    manage.textContent = 'Manage searches';
+    dataRow.after(manage);
+  }
   if (connectionError) {
     const notice = document.createElement('div');
     notice.className = 'connection-error';
@@ -194,10 +204,11 @@ function updateProgress() {
   const telegramStatus = app.querySelector('.telegram-status>span');
   if (telegramStatus) telegramStatus.textContent = backendStatus.telegram.ready ? 'Connected' : 'Not connected';
   app.querySelectorAll('[data-scan]').forEach(button => {
-    const label = backendStatus.scanning ? checkingLabel() : 'Check now';
+    const scheduled = backendStatus.mode === 'scheduled';
+    const label = backendStatus.scanning ? checkingLabel() : scheduled ? 'Hourly checks' : 'Check now';
     if (button.textContent.trim() !== label) button.textContent = label;
-    button.disabled = Boolean(backendStatus.scanning);
-    button.title = backendStatus.scanning ? 'Each source check has a four-minute deadline.' : backendStatus.next_scan ? `Next check: ${new Date(backendStatus.next_scan * 1000).toLocaleString()}` : 'Check sources now';
+    button.disabled = Boolean(backendStatus.scanning) || scheduled;
+    button.title = scheduled ? 'Checks run hourly in GitHub Actions. Use Run workflow there for an immediate check.' : backendStatus.scanning ? 'Each source check has a four-minute deadline.' : backendStatus.next_scan ? `Next check: ${new Date(backendStatus.next_scan * 1000).toLocaleString()}` : 'Check sources now';
   });
   const monitorStatus = app.querySelector('.demo-status');
   if (monitorStatus) monitorStatus.innerHTML = `<span></span>${backendStatus.scanning ? 'Scanning' : 'Monitoring'}`;

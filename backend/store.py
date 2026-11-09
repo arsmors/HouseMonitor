@@ -2,21 +2,28 @@
 
 import json
 import math
-import sqlite3
-from pathlib import Path
+import os
+import time
+
+from backend.database import batch, connect
 
 from backend.sources import DEFAULT_LABELS, DEFAULT_PATHS, Listing, is_sale_listing, match, now, relist_key
 
 
 class Store:
-    """Single-process database owner with short, atomic transactions."""
+    """Persistence with short, atomic transactions for SQLite or hosted libSQL."""
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, *, auth_token: str | None = None, recover: bool = True):
         """Create the database and seed real default category IDs once."""
-        if path != ":memory:":
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(path)
-        self.db.row_factory = sqlite3.Row
+        self.db = connect(path, auth_token)
+        try:
+            self._initialize(recover)
+        except Exception:
+            self.db.close()
+            raise
+
+    def _initialize(self, recover: bool):
+        """Create schema and perform startup maintenance on the selected database."""
         self.db.executescript("""
             PRAGMA journal_mode=WAL;
             PRAGMA foreign_keys=ON;
@@ -48,21 +55,55 @@ class Store:
             CREATE TABLE IF NOT EXISTS locations (id TEXT PRIMARY KEY, data TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS source_states (id TEXT PRIMARY KEY, data TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, message TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS leases (id TEXT PRIMARY KEY, owner TEXT NOT NULL, expires_at REAL NOT NULL);
         """)
+        if recover:
+            self.recover_deliveries()
         with self.db:
-            self.db.execute("UPDATE notifications SET status='uncertain', error='Process stopped during delivery; inspect Telegram before retrying' WHERE status='sending'")
-            if self.setting("initialized") is None:
+            initialized = self.db.execute("INSERT OR IGNORE INTO settings VALUES('initialized','true')").rowcount
+            if initialized:
                 self.db.execute("INSERT INTO searches(name,min,max,locations,created_at) VALUES(?,NULL,NULL,?,?)", ("Our next home", json.dumps(["ss:" + path for path in DEFAULT_PATHS]), now()))
-                self.set_setting("initialized", True)
             for path, label in zip(DEFAULT_PATHS, DEFAULT_LABELS):
                 record = {"id": "ss:" + path, "label": label, "path": path, "parent": "ss:" + path.rsplit("/", 1)[0], "group": "Selected areas"}
                 self.db.execute("INSERT OR IGNORE INTO locations VALUES(?,?)", (record["id"], json.dumps(record)))
         self.removed_buyer_requests = self.remove_buyer_requests()
         self._backfill_price_history()
 
+    @classmethod
+    def from_environment(cls, default_path: str, *, recover: bool = True, require_remote: bool = False):
+        """Fail explicitly rather than losing deployed data in a local file."""
+        url = os.getenv("TURSO_DATABASE_URL", "").strip()
+        token = os.getenv("TURSO_AUTH_TOKEN", "").strip()
+        if url or token or require_remote:
+            if not url.startswith("libsql://") or not token:
+                raise ValueError("Set TURSO_DATABASE_URL (libsql://) and TURSO_AUTH_TOKEN for a hosted libSQL database")
+            return cls(url, auth_token=token, recover=recover)
+        return cls(os.getenv("DATABASE_PATH", default_path), recover=recover)
+
     def close(self):
         """Release the SQLite handle on service shutdown."""
         self.db.close()
+
+    def acquire_lease(self, owner: str, duration: float = 1500) -> bool:
+        """Claim the single scheduled collector, including across deployments."""
+        timestamp = time.time()
+        with self.db:
+            return bool(self.db.execute(
+                "INSERT INTO leases VALUES('collector',?,?) "
+                "ON CONFLICT(id) DO UPDATE SET owner=excluded.owner,expires_at=excluded.expires_at "
+                "WHERE leases.expires_at<=?",
+                (owner, timestamp + duration, timestamp),
+            ).rowcount)
+
+    def release_lease(self, owner: str):
+        """Only release the collector lease belonging to this invocation."""
+        with self.db:
+            self.db.execute("DELETE FROM leases WHERE id='collector' AND owner=?", (owner,))
+
+    def recover_deliveries(self):
+        """Quarantine interrupted sends only after gaining exclusive collector ownership."""
+        with self.db:
+            self.db.execute("UPDATE notifications SET status='uncertain', error='Process stopped during delivery; inspect Telegram before retrying' WHERE status='sending'")
 
     def setting(self, key: str, default=None):
         """Read a JSON setting without exposing environment secrets."""
@@ -80,8 +121,11 @@ class Store:
 
     def save_locations(self, records: list[dict]):
         """Cache verified source category nodes."""
-        with self.db:
-            self.db.executemany("INSERT INTO locations VALUES(?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data", [(record["id"], json.dumps(record)) for record in records])
+        if records:
+            batch(self.db, [
+                ("INSERT INTO locations VALUES(?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data", (record["id"], json.dumps(record)))
+                for record in records
+            ])
 
     def searches(self) -> list[dict]:
         """Return search configuration with preserved history counts."""
@@ -144,18 +188,21 @@ class Store:
 
     def _backfill_price_history(self):
         """Seed known current prices as the starting point for exact-address histories."""
-        with self.db:
-            for row in self.db.execute("SELECT id,data,first_seen_at FROM listings ORDER BY julianday(first_seen_at),rowid").fetchall():
-                record = json.loads(row["data"])
-                key = relist_key(record)
-                price = str(record.get("price", "")).strip()
-                if key and price:
-                    self.db.execute(
-                        "INSERT INTO listing_price_history(history_key,listing_id,price,observed_at) "
-                        "SELECT ?,?,?,? WHERE NOT EXISTS "
-                        "(SELECT 1 FROM listing_price_history WHERE history_key=? AND listing_id=?)",
-                        (key, row["id"], price, row["first_seen_at"], key, row["id"]),
-                    )
+        statements = []
+        known = {(row["history_key"], row["listing_id"]) for row in self.db.execute("SELECT history_key,listing_id FROM listing_price_history")}
+        for row in self.db.execute("SELECT id,data,first_seen_at FROM listings ORDER BY julianday(first_seen_at),rowid").fetchall():
+            record = json.loads(row["data"])
+            key = relist_key(record)
+            price = str(record.get("price", "")).strip()
+            if key and price and (key, row["id"]) not in known:
+                statements.append((
+                    "INSERT INTO listing_price_history(history_key,listing_id,price,observed_at) "
+                    "SELECT ?,?,?,? WHERE NOT EXISTS "
+                    "(SELECT 1 FROM listing_price_history WHERE history_key=? AND listing_id=?)",
+                    (key, row["id"], price, row["first_seen_at"], key, row["id"]),
+                ))
+        if statements:
+            batch(self.db, statements)
 
     def ingest(self, scope: str, listings: list[Listing]) -> dict:
         """Atomically store a complete scope, its baseline, matches and outbox jobs."""
@@ -164,38 +211,49 @@ class Store:
         baseline = self.db.execute("SELECT 1 FROM scopes WHERE id=?", (scope,)).fetchone() is None
         timestamp = now()
         discovered = 0
-        queued = 0
-        with self.db:
-            for listing in listings:
-                record = listing.record()
-                previous = self.db.execute("SELECT data,first_seen_at FROM listings WHERE id=?", (listing.id,)).fetchone()
-                existing = previous is not None
-                cached = None
-                if previous:
-                    cached = json.loads(previous["data"])
-                    if not record.get("published_at") and cached.get("published_at"):
-                        record["published_at"] = cached["published_at"]
-                    if listing.source == "SS.lv" and cached.get("image_checked_at") and cached.get("image_thumbnail") == record.get("image"):
-                        for key in ["image", "image_thumbnail", "image_checked_at"]:
-                            record[key] = cached[key]
-                self.db.execute("INSERT INTO listings VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,last_seen_at=excluded.last_seen_at", (listing.id, listing.source, json.dumps(record), timestamp, timestamp))
-                key = relist_key(record)
-                price = str(record.get("price", "")).strip()
-                if key and price:
-                    latest = self.db.execute("SELECT listing_id,price FROM listing_price_history WHERE history_key=? ORDER BY id DESC LIMIT 1", (key,)).fetchone()
-                    if latest is None and cached and cached.get("price"):
-                        self.db.execute("INSERT INTO listing_price_history(history_key,listing_id,price,observed_at) VALUES(?,?,?,?)", (key, listing.id, str(cached["price"]).strip(), previous["first_seen_at"]))
-                        latest = {"listing_id": listing.id, "price": str(cached["price"]).strip()}
-                    if latest is None or latest["listing_id"] != listing.id or latest["price"] != price:
-                        self.db.execute("INSERT INTO listing_price_history(history_key,listing_id,price,observed_at) VALUES(?,?,?,?)", (key, listing.id, price, timestamp))
-                discovered += not existing
-                for search in active:
-                    if not match(record, search):
-                        continue
-                    self.db.execute("INSERT OR IGNORE INTO search_history VALUES(?,?,?)", (search["id"], listing.id, timestamp))
-                    if not baseline and not existing:
-                        queued += self.db.execute("INSERT OR IGNORE INTO notifications(search_id,listing_id) VALUES(?,?)", (search["id"], listing.id)).rowcount
-            self.db.execute("INSERT OR IGNORE INTO scopes VALUES(?,?)", (scope, timestamp))
+        previous_records = {row["id"]: dict(row) for row in self.db.execute("SELECT id,data,first_seen_at FROM listings")}
+        latest_prices = {row["history_key"]: dict(row) for row in self.db.execute(
+            "SELECT h.history_key,h.listing_id,h.price FROM listing_price_history h "
+            "JOIN (SELECT max(id) AS id FROM listing_price_history GROUP BY history_key) latest ON latest.id=h.id"
+        )}
+        statements = []
+        notification_indexes = []
+        for listing in listings:
+            record = listing.record()
+            previous = previous_records.get(listing.id)
+            existing = previous is not None
+            cached = None
+            if previous:
+                cached = json.loads(previous["data"])
+                if not record.get("published_at") and cached.get("published_at"):
+                    record["published_at"] = cached["published_at"]
+                if listing.source == "SS.lv" and cached.get("image_checked_at") and cached.get("image_thumbnail") == record.get("image"):
+                    for key in ["image", "image_thumbnail", "image_checked_at"]:
+                        record[key] = cached[key]
+            serialized = json.dumps(record)
+            statements.append(("INSERT INTO listings VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,last_seen_at=excluded.last_seen_at", (listing.id, listing.source, serialized, timestamp, timestamp)))
+            key = relist_key(record)
+            price = str(record.get("price", "")).strip()
+            if key and price:
+                latest = latest_prices.get(key)
+                if latest is None and cached and cached.get("price"):
+                    statements.append(("INSERT INTO listing_price_history(history_key,listing_id,price,observed_at) VALUES(?,?,?,?)", (key, listing.id, str(cached["price"]).strip(), previous["first_seen_at"])))
+                    latest = {"listing_id": listing.id, "price": str(cached["price"]).strip()}
+                if latest is None or latest["listing_id"] != listing.id or latest["price"] != price:
+                    statements.append(("INSERT INTO listing_price_history(history_key,listing_id,price,observed_at) VALUES(?,?,?,?)", (key, listing.id, price, timestamp)))
+                latest_prices[key] = {"listing_id": listing.id, "price": price}
+            previous_records[listing.id] = {"data": serialized, "first_seen_at": previous["first_seen_at"] if previous else timestamp}
+            discovered += not existing
+            for search in active:
+                if not match(record, search):
+                    continue
+                statements.append(("INSERT OR IGNORE INTO search_history VALUES(?,?,?)", (search["id"], listing.id, timestamp)))
+                if not baseline and not existing:
+                    notification_indexes.append(len(statements))
+                    statements.append(("INSERT OR IGNORE INTO notifications(search_id,listing_id) VALUES(?,?)", (search["id"], listing.id)))
+        statements.append(("INSERT OR IGNORE INTO scopes VALUES(?,?)", (scope, timestamp)))
+        results = batch(self.db, statements)
+        queued = sum(results[index].rowcount for index in notification_indexes)
         return {"baseline": baseline, "discovered": discovered, "queued": queued, "total": len(listings)}
 
     def listings(self, limit: int = 1000) -> list[dict]:

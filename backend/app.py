@@ -9,11 +9,12 @@ import os
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import aiohttp
 from aiohttp import web
 from dotenv import load_dotenv
 
 from backend.service import DEFAULT_INTERVAL, Monitor
-from backend.sources import RECENT_LOCATION_IDS
+from backend.sources import RECENT_LOCATION_IDS, PublicHTTP, SSAdapter, USER_AGENT
 from backend.store import Store
 from backend.telegram import run_bot
 
@@ -84,6 +85,8 @@ async def locations(request: web.Request):
 
 async def scan(request: web.Request):
     """Request a rate-limited manual scan without overlapping scheduled work."""
+    if request.app["monitor"].scheduled:
+        return web.json_response({"error": "Checks run hourly in GitHub Actions. Use Run workflow there for an immediate check."}, status=409)
     started = request.app["monitor"].trigger()
     return web.json_response({"started": started}, status=202 if started else 409)
 
@@ -134,23 +137,44 @@ async def lifecycle(app: web.Application):
         await monitor.close()
         store.close()
 
+async def scheduled_lifecycle(app: web.Application):
+    """Open only on-demand discovery resources; never start collectors in Vercel."""
+    monitor = app["monitor"]
+    monitor.session = aiohttp.ClientSession(
+        headers={"User-Agent": USER_AGENT},
+        timeout=aiohttp.ClientTimeout(total=15),
+    )
+    monitor.http = PublicHTTP(monitor.session)
+    monitor.ss = SSAdapter(monitor.http, monitor.store.locations())
+    try:
+        yield
+    finally:
+        await monitor.close()
+        monitor.store.close()
+
 
 def create_app(store: Store | None = None, start_tasks: bool = True) -> web.Application:
     """Build the web service with injectable persistence for integration tests."""
     if start_tasks:
         load_dotenv(ROOT / ".env")
+    scheduled = os.getenv("MONITOR_MODE", "continuous") == "scheduled"
+    if os.getenv("MONITOR_MODE", "continuous") not in {"continuous", "scheduled"}:
+        raise ValueError("MONITOR_MODE must be continuous or scheduled")
+    if scheduled and not os.getenv("WEB_PASSWORD"):
+        raise ValueError("WEB_PASSWORD is required for the scheduled dashboard")
     app = web.Application(middlewares=[security], client_max_size=32 * 1024)
     app["web_password"] = os.getenv("WEB_PASSWORD", "")
-    app["monitor"] = Monitor(store or Store(os.getenv("DATABASE_PATH", str(ROOT / "data" / "monitor.db"))),
+    app["monitor"] = Monitor(store or Store.from_environment(str(ROOT / "data" / "monitor.db"), recover=not scheduled, require_remote=scheduled),
                              int(os.getenv("POLL_INTERVAL", str(DEFAULT_INTERVAL))), os.getenv("CITY24_ENABLED", "true").lower() == "true",
                              os.getenv("LATIO_PERMISSION_CONFIRMED", "false").lower() == "true", os.getenv("RENTINRIGA_ENABLED", "true").lower() == "true")
+    app["monitor"].scheduled = scheduled
     app.add_routes([web.get("/api/state", state), web.post("/api/searches", save_search), web.put("/api/searches/{id:\\d+}", save_search),
                     web.delete("/api/searches/{id:\\d+}", delete_search), web.get("/api/locations", locations), web.post("/api/scan", scan),
                     web.put("/api/settings", settings), web.get("/api/health", health), web.get("/", index)])
     if (ROOT / "dist" / "assets").exists():
         app.router.add_static("/assets/", ROOT / "dist" / "assets")
     if start_tasks:
-        app.cleanup_ctx.append(lifecycle)
+        app.cleanup_ctx.append(scheduled_lifecycle if scheduled else lifecycle)
     return app
 
 

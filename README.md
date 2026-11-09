@@ -22,6 +22,77 @@ Set `TELEGRAM_BOT_TOKEN` from BotFather and your numeric `TELEGRAM_OWNER_ID` in 
 
 Commands: `/start`, `/help`, `/add [name]`, `/searches`, `/edit ID`, `/pause ID`, `/resume ID`, `/delete ID`, `/latest ID`, `/status`, `/cancel`. The creation/edit flow accepts `/skip` for optional area limits and inline multi-location selection from SS.lv's actual hierarchy.
 
+## Vercel Hobby + Hourly GitHub Actions
+
+The dashboard and API deploy together to Vercel using `Dockerfile.vercel`. An hourly GitHub Actions workflow runs the collectors, Chromium, photo enrichment, and notification delivery. Vercel never runs background monitoring in this mode. Both use the same hosted **Turso libSQL** database, not local SQLite or a synchronized local replica.
+
+This avoids Hobby's once-daily Vercel Cron limit and the monthly quota for continuously running Daemons. GitHub schedules are best-effort, not an exact hourly guarantee. Standard GitHub-hosted runners are free for public repositories; private repositories have Actions minute quotas and may incur charges. Check your account's Actions usage and Turso/Vercel quotas. Each scheduled invocation has a 20-minute work budget, plus installation time; remaining photos and queued notifications wait for the next run.
+
+### 1. Create durable storage
+
+Create a **libSQL-engine** database in [Turso](https://turso.tech/), not the newer Turso-engine database (`--tursodb`). Retrieve its `libsql://...` URL and a read/write auth token. The cross-platform `libsql-client` SDK connects directly to the hosted database; local development still defaults to SQLite. Listing ingestion uses a single atomic batch instead of a slow series of network round trips inside Turso's short interactive-transaction window.
+
+To keep existing local history, stop the local backend and create a consistent backup with SQLite's backup API:
+
+```powershell
+.\.venv\Scripts\python.exe -c "import sqlite3; source=sqlite3.connect('data/monitor.db'); target=sqlite3.connect('data/vercel-import.db'); source.backup(target); target.close(); source.close()"
+```
+
+With the [Turso CLI](https://docs.turso.tech/cli/installation) installed in a supported environment, import that backup when creating the database:
+
+```sh
+turso db create house-monitor --from-file ./data/vercel-import.db
+turso db show house-monitor --url
+turso db tokens create house-monitor
+```
+
+Otherwise create an empty libSQL database; the first scan establishes new silent baselines. Do not commit the backup, tokens, or database contents. Stop the old collector before enabling scheduled collection against the hosted database.
+
+### 2. Deploy the dashboard and API
+
+Import this repository into Vercel with the repository root as the project root. The checked-in `vercel.json` selects the Container framework, and `Dockerfile.vercel` builds the Vite dashboard and serves it with the Python API. Leave Build Command and Output Directory overrides unset.
+
+Set these **server-side Production environment variables** in Vercel before deploying:
+
+| Variable | Value |
+| --- | --- |
+| `TURSO_DATABASE_URL` | Your hosted database's `libsql://...` URL |
+| `TURSO_AUTH_TOKEN` | Your database's read/write token |
+| `WEB_PASSWORD` | A strong, unique dashboard password |
+| `MONITOR_MODE` | `scheduled` |
+| `HOST` | `0.0.0.0` |
+| `PORT` | `8787` |
+| `POLL_INTERVAL` | `3600` |
+
+Use the same `PORT` in Vercel project settings and the container. Do not prefix secrets with `VITE_`: those variables would be exposed to browsers. Telegram credentials are needed only in Actions, not Vercel. Use a separate database and password for Preview deployments if you enable them; never point previews at production data.
+
+Deploy, open the HTTPS Vercel URL, and sign in as `owner` using `WEB_PASSWORD`. A scheduled dashboard fails startup if the remote database credentials or password are missing; it never silently writes to temporary local storage.
+
+### 3. Enable hourly collection
+
+In this GitHub repository's **Settings > Secrets and variables > Actions**, add repository secrets:
+
+- `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`: the same database used by Vercel.
+- Optional `TELEGRAM_BOT_TOKEN` and `TELEGRAM_OWNER_ID`: set both, or leave both absent.
+
+Optional Actions **variables**: `CITY24_ENABLED` and `RENTINRIGA_ENABLED` default to `true`; `LATIO_PERMISSION_CONFIRMED` defaults to `false` and must remain false unless permission has been obtained.
+
+Push the changes to the default branch and enable Actions. Open **Actions > Hourly house checks > Run workflow** for the first scan. Subsequent runs are scheduled at minute 17 of every hour (UTC), avoiding the busiest top-of-hour period. GitHub can delay or drop scheduled runs under load, and public repositories' schedules can be disabled after 60 days without repository activity. Monitor workflow failures and re-enable inactive schedules when needed.
+
+The dashboard's manual-check button is disabled in scheduled mode; use **Run workflow** in GitHub for an immediate check. Editing searches takes effect at the next run. Database leases prevent overlapping collectors, and only the collector may recover interrupted notification deliveries; dashboard cold starts never quarantine an active delivery. Force-killed runs release their lease by expiry after 25 minutes.
+
+In scheduled mode, open **Settings > Manage searches** to edit notification searches without relying on an interactive Telegram wizard. The normal Recent listings view and continuous/local navigation remain unchanged.
+
+### Telegram behavior in scheduled mode
+
+Send `/start` to the bot from your configured private owner account. It is processed at the next scheduled run, which also delivers queued alerts. `/status` is supported; other commands direct you to the dashboard. Interactive chat search wizards and immediate command responses remain available only in the original continuous/local mode. No Telegram webhook or always-on polling process is required. Telegram retains pending updates for no more than 24 hours, so prolonged scheduler outages can require sending `/start` again.
+
+### Deployment verification
+
+Confirm that the first workflow succeeds, real listings appear after refresh, Activity shows each source's result, and Telegram `/start` is acknowledged on a subsequent run if enabled. Restart/redeploy the Vercel dashboard and confirm that listings and settings remain. Missing database configuration must fail rather than create a new local database. A live Vercel/Turso deployment and real Telegram delivery require your accounts and cannot be verified by local tests alone.
+
+With the built local service running, `.\.venv\Scripts\python.exe tests/browser_scheduled.py` checks the scheduled UI with mocked API responses and no database writes. An optional URL argument selects a Vite development server instead.
+
 ## Sources
 
 - **SS.lv:** Public sale-category HTML pages, complete pagination, labelled house-area extraction, stable advertisement URLs, and publication metadata from public RSS when available. Buyer requests sometimes appear in the sale-category results; these are excluded. The general RSS feed mixes transaction types, so it is not used as proof that an advertisement is for sale.

@@ -70,8 +70,9 @@ class Monitor:
         self.wake = asyncio.Event()
         self.location_lock = asyncio.Lock()
         self.last_trigger = 0.0
+        self.scheduled = False
 
-    async def start(self):
+    async def start(self, background: bool = True):
         """Open shared resources and schedule scans/delivery in the background."""
         for source, state in self.store.status()["sources"].items():
             if state.get("status") == "scanning":
@@ -79,7 +80,8 @@ class Monitor:
         self.session = aiohttp.ClientSession(headers={"User-Agent": USER_AGENT}, timeout=aiohttp.ClientTimeout(total=45))
         self.http = PublicHTTP(self.session)
         self.ss = SSAdapter(self.http, self.store.locations())
-        self.tasks = [asyncio.create_task(self.run(), name="monitor"), asyncio.create_task(self.deliver_loop(), name="outbox"), asyncio.create_task(self.image_loop(), name="listing-photos")]
+        if background:
+            self.tasks = [asyncio.create_task(self.run(), name="monitor"), asyncio.create_task(self.deliver_loop(), name="outbox"), asyncio.create_task(self.image_loop(), name="listing-photos")]
 
     async def close(self):
         """Cancel work and explicitly release HTTP resources."""
@@ -105,6 +107,8 @@ class Monitor:
 
     def trigger(self) -> bool:
         """Allow a user scan without permitting rapid repeated source requests."""
+        if self.scheduled:
+            return False
         if self.scanning or time.monotonic() - self.last_trigger < 60:
             return False
         self.last_trigger = time.monotonic()
@@ -318,6 +322,16 @@ class Monitor:
 
     def status(self) -> dict:
         """Return runtime state without ever exposing tokens or passwords."""
+        if self.scheduled:
+            run = self.store.setting("collector_run", {})
+            scanning = run.get("expires_at", 0) > time.time()
+            return {**self.store.status(), "mode": "scheduled", "scanning": scanning,
+                    "scan_started_at": run.get("started_at") if scanning else None,
+                    "last_scan": self.store.setting("last_scan"), "next_scan": None, "interval": self.interval,
+                    "telegram": self.store.setting("scheduled_telegram", {
+                        "configured": False, "ready": False, "username": None,
+                        "error": "Telegram connects during scheduled checks",
+                    })}
         return {**self.store.status(), "scanning": self.scanning, "scan_started_at": self.scan_started_at, "last_scan": self.last_scan,
                 "next_scan": self.next_scan, "interval": self.interval,
                 "telegram": {"configured": bool(self.bot), "ready": bool(self.bot and self.store.setting("telegram_ready")),

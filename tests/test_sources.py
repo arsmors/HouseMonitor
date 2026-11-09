@@ -4,10 +4,15 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from backend.sources import City24Adapter, RentInRigaAdapter, location_ids_for_text, match, parse_area, parse_city24, parse_latio, parse_rentinriga, parse_ss, parse_ss_image
+from backend.sources import City24Adapter, RentInRigaAdapter, location_ids_for_text, match, parse_area, parse_city24, parse_latio, parse_rentinriga, parse_ss, parse_ss_image, parse_ss_publication
 
 
 class SourceTests(unittest.TestCase):
+    def test_ss_publication_uses_riga_timezone(self):
+        self.assertEqual(parse_ss_publication("<div>Datums: 09.11.2026 15:07</div>"), "2026-11-09T15:07:00+02:00")
+        self.assertEqual(parse_ss_publication("<div>Datums: 09.07.2026 15:07</div>"), "2026-07-09T15:07:00+03:00")
+        self.assertIsNone(parse_ss_publication("<div>No publication date</div>"))
+
     """Exercise the critical source-data boundary."""
 
     def test_area_formats(self):

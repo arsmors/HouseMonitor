@@ -181,6 +181,16 @@ class StoreTests(unittest.TestCase):
         self.store.ingest("scope", [original])
         self.assertNotIn("image_checked_at", self.store.listings()[0])
 
+    def test_enriched_publication_dates_sort_imported_ads_newest_first(self):
+        self.store.ingest("scope", [listing("new"), listing("old")])
+        self.store.update_image("new", None, 123, published_at="2026-11-09T15:07:00+02:00", details_checked=True)
+        self.store.update_image("old", None, 123, published_at="2026-11-08T15:07:00+02:00", details_checked=True)
+        self.store.ingest("scope", [listing("new"), listing("old")])
+        records = self.store.listings()
+        self.assertEqual([record["id"] for record in records], ["new", "old"])
+        self.assertEqual(records[0]["published_at"], "2026-11-09T15:07:00+02:00")
+        self.assertEqual(records[0]["details_checked_at"], 123)
+
     def test_new_ads_from_every_portal_sort_first(self):
         """Mix sources by discovery time, without moving refreshed or enriched old ads up."""
         old = listing("ss:old")

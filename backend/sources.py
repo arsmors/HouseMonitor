@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from urllib.parse import parse_qs, urlencode, urljoin, urlsplit, urlunsplit
 from urllib.robotparser import RobotFileParser
+from zoneinfo import ZoneInfo
 
 import aiohttp
 import feedparser
@@ -153,6 +154,17 @@ def parse_ss_image(html: str, page_url: str) -> str | None:
     return None
 
 
+def parse_ss_publication(html: str) -> str | None:
+    """Read the displayed ad date in Latvia's local timezone."""
+    text = BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
+    found = re.search(r"\bDatums:\s*(\d{2}\.\d{2}\.\d{4}\s+\d{2}:\d{2})", text)
+    if not found:
+        return None
+    return datetime.strptime(found.group(1), "%d.%m.%Y %H:%M").replace(
+        tzinfo=ZoneInfo("Europe/Riga")
+    ).isoformat()
+
+
 def match(listing: dict, search: dict) -> bool:
     """Apply inclusive house-area limits and exact geographic IDs."""
     if search["locations"] and not set(search["locations"]).intersection(listing["location_ids"]):
@@ -260,6 +272,11 @@ class SSAdapter:
     async def full_image(self, listing_url: str) -> str | None:
         """Retrieve a public advertisement's real gallery URL through the shared rate limit."""
         return parse_ss_image(await self.http.get(listing_url), listing_url)
+
+    async def details(self, listing_url: str) -> tuple[str | None, str | None]:
+        """Read the gallery photo and publication date from one public request."""
+        html = await self.http.get(listing_url)
+        return parse_ss_image(html, listing_url), parse_ss_publication(html)
 
     async def collect(self, path: str) -> list[Listing]:
         """Read every page in a selected sale scope; never baseline a partial scan."""

@@ -34,6 +34,8 @@ Create a **libSQL-engine** database in [Turso](https://turso.tech/), not the new
 
 Local-only WAL and busy-timeout pragmas are not sent to Turso. Full-size photo URLs are cached in the shared database so dashboard restarts do not reset photo enrichment.
 
+Ads appear newest first by publication date (or rediscovery date for relists), with discovery time as the fallback. SS.lv detail enrichment reads the displayed ad date in the Europe/Riga timezone alongside its photo; missing dates are backfilled during collection.
+
 Run the collector once before opening a fresh deployment. The collector initializes and maintains the schema; scheduled dashboard cold starts only open the existing database to avoid schema-write contention and startup timeouts.
 
 To keep existing local history, stop the local backend and create a consistent backup with SQLite's backup API:

@@ -247,13 +247,13 @@ class Monitor:
             matched = any(match(listing, search) for search in active)
             if listing["source"] != "SS.lv" or not visible and not matched:
                 continue
-            if time.time() - listing.get("image_checked_at", 0) < 86400:
+            if time.time() - listing.get("details_checked_at", 0) < 86400:
                 continue
             try:
-                image = await self.ss.full_image(listing["url"])
-                self.store.update_image(listing["id"], image, time.time())
+                image, published_at = await self.ss.details(listing["url"])
+                self.store.update_image(listing["id"], image, time.time(), published_at=published_at, details_checked=True)
             except (ValueError, aiohttp.ClientError, asyncio.TimeoutError):
-                self.store.update_image(listing["id"], None, time.time())
+                self.store.update_image(listing["id"], None, time.time(), details_checked=True)
                 LOGGER.debug("SS.lv photo unavailable; keeping existing image")
                 break
 

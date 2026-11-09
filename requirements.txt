@@ -5,3 +5,4 @@ feedparser>=6.0,<7
 python-dotenv>=1.2,<2
 playwright>=1.56,<2
 libsql>=0.1.11,<0.2; python_version < "3.14"
+tzdata>=2025.2

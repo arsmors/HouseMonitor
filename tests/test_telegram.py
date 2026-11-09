@@ -79,28 +79,29 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
     async def test_image_worker_only_upgrades_matches_once(self):
         """Backfill matching photos once without changing notification queue state."""
         self.store.ingest("scope", [Listing("ss:outside", "SS.lv", "Outside", "https://www.ss.lv/msg/outside.html", "100 €", "Mārupe", ["ss:riga-region/marupes-pag"], 165, "165", "parsed")])
-        self.monitor.ss = SimpleNamespace(full_image=AsyncMock(return_value="https://i.ss.lv/gallery/house.800.jpg"))
+        self.monitor.ss = SimpleNamespace(details=AsyncMock(return_value=("https://i.ss.lv/gallery/house.800.jpg", "2026-11-09T15:07:00+02:00")))
         before = self.store.status()["queue"]
         await self.monitor.enrich_images()
         await self.monitor.enrich_images()
-        self.monitor.ss.full_image.assert_awaited_once_with("https://www.ss.lv/msg/house.html")
+        self.monitor.ss.details.assert_awaited_once_with("https://www.ss.lv/msg/house.html")
         upgraded = next(listing for listing in self.store.listings() if listing["id"] == "ss:new")
         self.assertEqual(upgraded["image"], "https://i.ss.lv/gallery/house.800.jpg")
+        self.assertEqual(upgraded["published_at"], "2026-11-09T15:07:00+02:00")
         self.assertEqual(self.store.status()["queue"], before)
 
     async def test_image_worker_upgrades_recent_listings_without_searches(self):
         """Improve photos shown in Recent listings when no saved searches remain."""
         for search in self.store.searches():
             self.store.delete_search(search["id"])
-        self.monitor.ss = SimpleNamespace(full_image=AsyncMock(return_value="https://i.ss.lv/gallery/house.800.jpg"))
+        self.monitor.ss = SimpleNamespace(details=AsyncMock(return_value=("https://i.ss.lv/gallery/house.800.jpg", None)))
         await self.monitor.enrich_images()
-        self.monitor.ss.full_image.assert_awaited_once_with("https://www.ss.lv/msg/house.html")
+        self.monitor.ss.details.assert_awaited_once_with("https://www.ss.lv/msg/house.html")
         upgraded = self.store.listings()[0]
         self.assertEqual(upgraded["image"], "https://i.ss.lv/gallery/house.800.jpg")
 
     async def test_image_failure_keeps_listing_and_thumbnail(self):
         """A blocked detail page does not hide a listing or fail the monitor."""
-        self.monitor.ss = SimpleNamespace(full_image=AsyncMock(side_effect=ValueError("Source unavailable")))
+        self.monitor.ss = SimpleNamespace(details=AsyncMock(side_effect=ValueError("Source unavailable")))
         await self.monitor.enrich_images()
         self.assertEqual(len(self.store.listings()), 1)
         self.assertIsNone(self.store.listings()[0]["image"])

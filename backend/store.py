@@ -234,6 +234,8 @@ class Store:
                 if listing.source == "SS.lv" and cached.get("image_checked_at") and cached.get("image_thumbnail") == record.get("image"):
                     for key in ["image", "image_thumbnail", "image_checked_at"]:
                         record[key] = cached[key]
+                    if "details_checked_at" in cached:
+                        record["details_checked_at"] = cached["details_checked_at"]
             serialized = json.dumps(record)
             statements.append(("INSERT INTO listings VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,last_seen_at=excluded.last_seen_at", (listing.id, listing.source, serialized, timestamp, timestamp)))
             key = relist_key(record)
@@ -301,7 +303,7 @@ class Store:
         )
         return records[:limit] if limit >= 0 else records
 
-    def update_image(self, listing_id: str, image: str | None, checked_at: float):
+    def update_image(self, listing_id: str, image: str | None, checked_at: float, *, published_at: str | None = None, details_checked: bool = False):
         """Persist photo enrichment without changing discovery times or notification history."""
         row = self.db.execute("SELECT data FROM listings WHERE id=?", (listing_id,)).fetchone()
         if not row:
@@ -309,6 +311,10 @@ class Store:
         record = json.loads(row["data"])
         record.setdefault("image_thumbnail", record.get("image"))
         record["image_checked_at"] = checked_at
+        if details_checked:
+            record["details_checked_at"] = checked_at
+        if published_at:
+            record["published_at"] = published_at
         if image:
             record["image"] = image
         batch(self.db, [("UPDATE listings SET data=? WHERE id=?", (json.dumps(record), listing_id))])

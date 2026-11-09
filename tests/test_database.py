@@ -7,8 +7,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from libsql_client import LibsqlError, create_client_sync
-
 from backend.database import RemoteConnection, batch, connect
 from backend.store import Store
 from tests import test_store
@@ -22,7 +20,7 @@ class RemoteStoreTests(test_store.StoreTests):
             directory = tempfile.TemporaryDirectory()
             self.addCleanup(directory.cleanup)
             path = str(Path(directory.name) / "monitor.db")
-        return create_client_sync("file:" + path)
+        return sqlite3.connect(path)
 
     def setUp(self):
         def connect_remote(path, token=None):
@@ -36,7 +34,7 @@ class RemoteStoreTests(test_store.StoreTests):
         super().setUp()
 
     def test_schema_errors_are_not_silenced(self):
-        with self.assertRaises(LibsqlError):
+        with self.assertRaises(sqlite3.Error):
             self.store.db.executescript("CREATE TABLE invalid (")
 
     def test_lease_ownership_and_expiry(self):
@@ -54,7 +52,7 @@ class RemoteStoreTests(test_store.StoreTests):
 
     def test_large_scope_uses_one_atomic_batch(self):
         listings = [test_store.listing(f"ss:{number}") for number in range(1000)]
-        with patch.object(self.store.db.client, "batch", wraps=self.store.db.client.batch) as write:
+        with patch.object(self.store.db, "batch", wraps=self.store.db.batch) as write:
             result = self.store.ingest("large", listings)
             self.assertEqual(write.call_count, 1)
         self.assertEqual(result["discovered"], 1000)
@@ -62,7 +60,7 @@ class RemoteStoreTests(test_store.StoreTests):
         self.assertEqual(len(self.store.listings(10000)), 1000)
 
     def test_failed_batch_rolls_back_every_statement(self):
-        with self.assertRaises(LibsqlError):
+        with self.assertRaises(sqlite3.Error):
             batch(self.store.db, [
                 ("INSERT INTO scopes VALUES(?,?)", ("rollback-test", "now")),
                 ("INSERT INTO scopes VALUES(?,?)", ("rollback-test", "now")),
@@ -100,11 +98,12 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "libsql://"):
             connect("https://example", auth_token="test-token")
 
-    def test_remote_libsql_urls_use_https(self):
-        with patch("backend.database.create_client_sync") as create_client:
+    def test_remote_libsql_urls_use_libsql_driver(self):
+        with patch("backend.database.import_module") as import_module:
+            create_client = import_module.return_value.connect
             connection = connect("libsql://example.turso.io", auth_token="test-token")
-        create_client.assert_called_once_with("https://example.turso.io", auth_token="test-token")
-        self.assertFalse(connection.supports_transactions)
+        import_module.assert_called_once_with("libsql")
+        create_client.assert_called_once_with(database="libsql://example.turso.io", auth_token="test-token")
 
     def test_scheduled_api_does_not_quarantine_live_deliveries(self):
         import tempfile

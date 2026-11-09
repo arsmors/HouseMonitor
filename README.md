@@ -30,7 +30,7 @@ This avoids Hobby's once-daily Vercel Cron limit and the monthly quota for conti
 
 ### 1. Create durable storage
 
-Create a **libSQL-engine** database in [Turso](https://turso.tech/), not the newer Turso-engine database (`--tursodb`). Retrieve its `libsql://...` URL and a read/write auth token. The cross-platform `libsql-client` SDK connects directly to the hosted database; local development still defaults to SQLite. Listing ingestion uses a single atomic batch instead of a slow series of network round trips inside Turso's short interactive-transaction window.
+Create a **libSQL-engine** database in [Turso](https://turso.tech/), not the newer Turso-engine database (`--tursodb`). Retrieve its `libsql://...` URL and a read/write auth token. The `libsql` Python SDK connects directly to the hosted database over HTTP; local development still defaults to SQLite. Bulk writes are grouped by SQL statement and committed in one transaction.
 
 To keep existing local history, stop the local backend and create a consistent backup with SQLite's backup API:
 

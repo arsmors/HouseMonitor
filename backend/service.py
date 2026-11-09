@@ -235,10 +235,13 @@ class Monitor:
                         LOGGER.warning("Could not deliver monitoring warning")
 
     async def enrich_images(self):
-        """Upgrade only matching SS.lv photos, with a persistent one-day detail-page cache."""
+        """Upgrade visible and matching SS.lv photos with a persistent one-day cache."""
         active = [search for search in self.store.searches() if search["active"]]
+        recent_locations = set(RECENT_LOCATION_IDS)
         for listing in self.store.listings(10000):
-            if listing["source"] != "SS.lv" or not any(match(listing, search) for search in active):
+            visible = bool(recent_locations.intersection(listing["location_ids"]))
+            matched = any(match(listing, search) for search in active)
+            if listing["source"] != "SS.lv" or not visible and not matched:
                 continue
             if time.time() - listing.get("image_checked_at", 0) < 86400:
                 continue

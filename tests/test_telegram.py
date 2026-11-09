@@ -88,6 +88,16 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(upgraded["image"], "https://i.ss.lv/gallery/house.800.jpg")
         self.assertEqual(self.store.status()["queue"], before)
 
+    async def test_image_worker_upgrades_recent_listings_without_searches(self):
+        """Improve photos shown in Recent listings when no saved searches remain."""
+        for search in self.store.searches():
+            self.store.delete_search(search["id"])
+        self.monitor.ss = SimpleNamespace(full_image=AsyncMock(return_value="https://i.ss.lv/gallery/house.800.jpg"))
+        await self.monitor.enrich_images()
+        self.monitor.ss.full_image.assert_awaited_once_with("https://www.ss.lv/msg/house.html")
+        upgraded = self.store.listings()[0]
+        self.assertEqual(upgraded["image"], "https://i.ss.lv/gallery/house.800.jpg")
+
     async def test_image_failure_keeps_listing_and_thumbnail(self):
         """A blocked detail page does not hide a listing or fail the monitor."""
         self.monitor.ss = SimpleNamespace(full_image=AsyncMock(side_effect=ValueError("Source unavailable")))

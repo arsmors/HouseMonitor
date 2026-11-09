@@ -63,7 +63,7 @@ class RemoteConnection:
                 if len(group) == 1:
                     results[indexes[0]] = Cursor(self.client.execute(sql, parameters[0]))
                     continue
-                cursor = Cursor(self.client.executemany(sql, parameters))
+                cursor = Cursor(self.client.executemany(sql, list(parameters)))
                 results[indexes[0]] = cursor
                 for index in indexes[1:]:
                     results[index] = Cursor(cursor.result, rowcount=0)

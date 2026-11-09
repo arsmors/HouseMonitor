@@ -84,6 +84,20 @@ class RemoteStoreTests(test_store.StoreTests):
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_remote_bulk_parameters_are_a_list(self):
+        client = Mock()
+        client.__enter__ = Mock(return_value=client)
+        client.__exit__ = Mock(return_value=False)
+        client.executemany.return_value.description = None
+        connection = RemoteConnection(client)
+        connection.batch([
+            ("INSERT INTO example VALUES(?)", ("first",)),
+            ("INSERT INTO example VALUES(?)", ("second",)),
+        ])
+        client.executemany.assert_called_once_with(
+            "INSERT INTO example VALUES(?)", [("first",), ("second",)]
+        )
+
     def test_remote_schema_skips_local_only_pragmas(self):
         client = Mock()
         client.execute.return_value.description = None

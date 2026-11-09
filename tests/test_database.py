@@ -4,6 +4,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from importlib.util import find_spec
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -152,3 +153,30 @@ class ConfigurationTests(unittest.TestCase):
                 self.assertEqual(api_store.status()["queue"]["uncertain"], 1)
             finally:
                 api_store.close()
+
+
+@unittest.skipUnless(find_spec("libsql"), "libsql SDK is not installed")
+class LibsqlStoreTests(unittest.TestCase):
+    """Exercise the native SDK as well as the SQLite compatibility test double."""
+
+    def test_native_driver_persists_full_size_photo_after_reopen(self):
+        from importlib import import_module
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "monitor.db")
+            with patch("backend.store.connect", side_effect=lambda path, token=None: RemoteConnection(
+                import_module("libsql").connect(path)
+            )):
+                store = Store(path)
+                try:
+                    store.ingest("photos", [test_store.listing("photo")])
+                    store.update_image("photo", "https://i.ss.lv/gallery/photo.800.jpg", 123)
+                finally:
+                    store.close()
+                reopened = Store(path)
+                try:
+                    listing = reopened.listings()[0]
+                    self.assertEqual(listing["image"], "https://i.ss.lv/gallery/photo.800.jpg")
+                    self.assertEqual(listing["image_checked_at"], 123)
+                finally:
+                    reopened.close()

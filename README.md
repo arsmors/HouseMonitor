@@ -32,6 +32,8 @@ This avoids Hobby's once-daily Vercel Cron limit and the monthly quota for conti
 
 Create a **libSQL-engine** database in [Turso](https://turso.tech/), not the newer Turso-engine database (`--tursodb`). Retrieve its `libsql://...` URL and a read/write auth token. The `libsql` Python SDK connects directly to the hosted database over HTTP; local development still defaults to SQLite. Bulk writes are grouped by SQL statement and committed in one transaction.
 
+Local-only WAL and busy-timeout pragmas are not sent to Turso. Full-size photo URLs are cached in the shared database so dashboard restarts do not reset photo enrichment.
+
 To keep existing local history, stop the local backend and create a consistent backup with SQLite's backup API:
 
 ```powershell

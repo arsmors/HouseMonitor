@@ -71,7 +71,10 @@ class RemoteConnection:
 
     def executescript(self, script):
         for statement in script.split(";"):
-            if statement.strip() and "journal_mode" not in statement:
+            if statement.strip() and statement.strip().upper() not in {
+                "PRAGMA JOURNAL_MODE=WAL",
+                "PRAGMA BUSY_TIMEOUT=5000",
+            }:
                 self.execute(statement)
 
     def __enter__(self):

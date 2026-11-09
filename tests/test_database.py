@@ -5,7 +5,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from backend.database import RemoteConnection, batch, connect
 from backend.store import Store
@@ -84,6 +84,19 @@ class RemoteStoreTests(test_store.StoreTests):
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_remote_schema_skips_local_only_pragmas(self):
+        client = Mock()
+        client.execute.return_value.description = None
+        connection = RemoteConnection(client)
+        connection.executescript(
+            "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;"
+            " PRAGMA busy_timeout=5000; CREATE TABLE example (id INTEGER);"
+        )
+        self.assertEqual(
+            [call.args[0].strip() for call in client.execute.call_args_list],
+            ["PRAGMA foreign_keys=ON", "CREATE TABLE example (id INTEGER)"],
+        )
+
     def test_scheduled_storage_cannot_fall_back_to_local_disk(self):
         with patch.dict(os.environ, {"TURSO_DATABASE_URL": "", "TURSO_AUTH_TOKEN": ""}):
             with self.assertRaisesRegex(ValueError, "TURSO_DATABASE_URL"):

@@ -59,13 +59,15 @@ class Store:
         """)
         if recover:
             self.recover_deliveries()
-        with self.db:
-            initialized = self.db.execute("INSERT OR IGNORE INTO settings VALUES('initialized','true')").rowcount
-            if initialized:
-                self.db.execute("INSERT INTO searches(name,min,max,locations,created_at) VALUES(?,NULL,NULL,?,?)", ("Our next home", json.dumps(["ss:" + path for path in DEFAULT_PATHS]), now()))
-            for path, label in zip(DEFAULT_PATHS, DEFAULT_LABELS):
-                record = {"id": "ss:" + path, "label": label, "path": path, "parent": "ss:" + path.rsplit("/", 1)[0], "group": "Selected areas"}
-                self.db.execute("INSERT OR IGNORE INTO locations VALUES(?,?)", (record["id"], json.dumps(record)))
+        statements = [
+            ("INSERT OR IGNORE INTO settings VALUES('initialized','true')", ()),
+            ("INSERT INTO searches(name,min,max,locations,created_at) SELECT ?,NULL,NULL,?,? WHERE changes()=1",
+             ("Our next home", json.dumps(["ss:" + path for path in DEFAULT_PATHS]), now())),
+        ]
+        for path, label in zip(DEFAULT_PATHS, DEFAULT_LABELS):
+            record = {"id": "ss:" + path, "label": label, "path": path, "parent": "ss:" + path.rsplit("/", 1)[0], "group": "Selected areas"}
+            statements.append(("INSERT OR IGNORE INTO locations VALUES(?,?)", (record["id"], json.dumps(record))))
+        batch(self.db, statements)
         self.removed_buyer_requests = self.remove_buyer_requests()
         self._backfill_price_history()
 
@@ -87,23 +89,20 @@ class Store:
     def acquire_lease(self, owner: str, duration: float = 1500) -> bool:
         """Claim the single scheduled collector, including across deployments."""
         timestamp = time.time()
-        with self.db:
-            return bool(self.db.execute(
-                "INSERT INTO leases VALUES('collector',?,?) "
-                "ON CONFLICT(id) DO UPDATE SET owner=excluded.owner,expires_at=excluded.expires_at "
-                "WHERE leases.expires_at<=?",
-                (owner, timestamp + duration, timestamp),
-            ).rowcount)
+        return bool(batch(self.db, [
+            ("INSERT INTO leases VALUES('collector',?,?) "
+             "ON CONFLICT(id) DO UPDATE SET owner=excluded.owner,expires_at=excluded.expires_at "
+             "WHERE leases.expires_at<=?",
+             (owner, timestamp + duration, timestamp)),
+        ])[0].rowcount)
 
     def release_lease(self, owner: str):
         """Only release the collector lease belonging to this invocation."""
-        with self.db:
-            self.db.execute("DELETE FROM leases WHERE id='collector' AND owner=?", (owner,))
+        batch(self.db, [("DELETE FROM leases WHERE id='collector' AND owner=?", (owner,))])
 
     def recover_deliveries(self):
         """Quarantine interrupted sends only after gaining exclusive collector ownership."""
-        with self.db:
-            self.db.execute("UPDATE notifications SET status='uncertain', error='Process stopped during delivery; inspect Telegram before retrying' WHERE status='sending'")
+        batch(self.db, [("UPDATE notifications SET status='uncertain', error='Process stopped during delivery; inspect Telegram before retrying' WHERE status='sending'", ())])
 
     def setting(self, key: str, default=None):
         """Read a JSON setting without exposing environment secrets."""
@@ -112,8 +111,7 @@ class Store:
 
     def set_setting(self, key: str, value):
         """Persist one service setting."""
-        with self.db:
-            self.db.execute("INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, json.dumps(value)))
+        batch(self.db, [("INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, json.dumps(value)))])
 
     def locations(self) -> dict[str, dict]:
         """Return the cached, source-discovered geographic catalog."""
@@ -157,20 +155,22 @@ class Store:
         if search_id is not None and existing is None:
             raise ValueError("Search not found")
         values = (name.strip(), data.get("min"), data.get("max"), json.dumps(list(dict.fromkeys(locations))), int(data.get("active", existing["active"] if existing else True)))
-        with self.db:
-            if existing:
-                self.db.execute("UPDATE searches SET name=?,min=?,max=?,locations=?,active=? WHERE id=?", (*values, search_id))
-            else:
-                cursor = self.db.execute("INSERT INTO searches(name,min,max,locations,active,created_at) VALUES(?,?,?,?,?,?)", (*values, now()))
-                search_id = cursor.lastrowid
+        if existing:
+            batch(self.db, [("UPDATE searches SET name=?,min=?,max=?,locations=?,active=? WHERE id=?", (*values, search_id))])
+        else:
+            cursor = batch(self.db, [
+                ("INSERT INTO searches(name,min,max,locations,active,created_at) VALUES(?,?,?,?,?,?)", (*values, now())),
+            ])[0]
+            search_id = cursor.lastrowid
         self.event("Search updated" if existing else "Search created")
         return next(search for search in self.searches() if search["id"] == search_id)
 
     def delete_search(self, search_id: int):
         """Soft-delete a search and cancel its unsent deliveries, retaining history."""
-        with self.db:
-            self.db.execute("UPDATE searches SET deleted=1,active=0 WHERE id=?", (search_id,))
-            self.db.execute("UPDATE notifications SET status='cancelled' WHERE search_id=? AND status IN ('pending','failed')", (search_id,))
+        batch(self.db, [
+            ("UPDATE searches SET deleted=1,active=0 WHERE id=?", (search_id,)),
+            ("UPDATE notifications SET status='cancelled' WHERE search_id=? AND status IN ('pending','failed')", (search_id,)),
+        ])
 
     def remove_buyer_requests(self) -> int:
         """Permanently remove legacy SS.lv buyer requests and their related history."""
@@ -179,11 +179,12 @@ class Store:
         if not identifiers:
             return 0
         placeholders = ",".join("?" for _ in identifiers)
-        with self.db:
-            self.db.execute(f"DELETE FROM notifications WHERE listing_id IN ({placeholders})", identifiers)
-            self.db.execute(f"DELETE FROM search_history WHERE listing_id IN ({placeholders})", identifiers)
-            self.db.execute(f"DELETE FROM listing_price_history WHERE listing_id IN ({placeholders})", identifiers)
-            self.db.execute(f"DELETE FROM listings WHERE id IN ({placeholders})", identifiers)
+        batch(self.db, [
+            (f"DELETE FROM notifications WHERE listing_id IN ({placeholders})", identifiers),
+            (f"DELETE FROM search_history WHERE listing_id IN ({placeholders})", identifiers),
+            (f"DELETE FROM listing_price_history WHERE listing_id IN ({placeholders})", identifiers),
+            (f"DELETE FROM listings WHERE id IN ({placeholders})", identifiers),
+        ])
         return len(identifiers)
 
     def _backfill_price_history(self):
@@ -307,8 +308,7 @@ class Store:
         record["image_checked_at"] = checked_at
         if image:
             record["image"] = image
-        with self.db:
-            self.db.execute("UPDATE listings SET data=? WHERE id=?", (json.dumps(record), listing_id))
+        batch(self.db, [("UPDATE listings SET data=? WHERE id=?", (json.dumps(record), listing_id))])
 
     def pending(self, timestamp: float) -> list[dict]:
         """Get due jobs only for active searches while delivery is enabled."""
@@ -319,19 +319,21 @@ class Store:
 
     def delivery(self, notification_id: int, status: str, error: str | None = None, next_attempt: float = 0, message_id: int | None = None):
         """Record delivery outcome; uncertain deliveries are never retried automatically."""
-        with self.db:
-            self.db.execute("UPDATE notifications SET status=?,error=?,next_attempt=?,message_id=?,sent_at=?,attempts=attempts+? WHERE id=?", (status, error, next_attempt, message_id, now() if status == "sent" else None, int(status == "sending"), notification_id))
+        batch(self.db, [
+            ("UPDATE notifications SET status=?,error=?,next_attempt=?,message_id=?,sent_at=?,attempts=attempts+? WHERE id=?",
+             (status, error, next_attempt, message_id, now() if status == "sent" else None, int(status == "sending"), notification_id)),
+        ])
 
     def source_state(self, source: str, state: dict):
         """Persist source health across process restarts."""
-        with self.db:
-            self.db.execute("INSERT INTO source_states VALUES(?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data", (source, json.dumps(state)))
+        batch(self.db, [("INSERT INTO source_states VALUES(?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data", (source, json.dumps(state)))])
 
     def event(self, message: str):
         """Keep a bounded human-readable activity log."""
-        with self.db:
-            self.db.execute("INSERT INTO events(created_at,message) VALUES(?,?)", (now(), message[:500]))
-            self.db.execute("DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT 100)")
+        batch(self.db, [
+            ("INSERT INTO events(created_at,message) VALUES(?,?)", (now(), message[:500])),
+            ("DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT 100)", ()),
+        ])
 
     def status(self) -> dict:
         """Expose non-secret monitoring status and queue counters."""

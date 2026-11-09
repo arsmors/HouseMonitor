@@ -43,8 +43,9 @@ class Cursor:
 class RemoteConnection:
     """Keep transactions on a direct cloud connection, never an ephemeral replica."""
 
-    def __init__(self, client):
+    def __init__(self, client, *, supports_transactions: bool = True):
         self.client = client
+        self.supports_transactions = supports_transactions
         self.transaction = None
         self.depth = 0
 
@@ -63,6 +64,8 @@ class RemoteConnection:
                 self.execute(statement)
 
     def __enter__(self):
+        if not self.supports_transactions:
+            raise RuntimeError("Interactive transactions are not supported by the HTTP database connection")
         if self.depth == 0:
             self.transaction = self.client.transaction()
         self.depth += 1
@@ -97,7 +100,8 @@ def connect(path: str, auth_token: str | None = None):
     if path.startswith("libsql://"):
         if not auth_token:
             raise ValueError("TURSO_AUTH_TOKEN is required with TURSO_DATABASE_URL")
-        return RemoteConnection(create_client_sync(path, auth_token=auth_token))
+        http_url = path.replace("libsql://", "https://", 1)
+        return RemoteConnection(create_client_sync(http_url, auth_token=auth_token), supports_transactions=False)
     if auth_token:
         raise ValueError("TURSO_DATABASE_URL must start with libsql://")
     if path != ":memory:":

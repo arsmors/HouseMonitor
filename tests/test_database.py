@@ -100,6 +100,12 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "libsql://"):
             connect("https://example", auth_token="test-token")
 
+    def test_remote_libsql_urls_use_https(self):
+        with patch("backend.database.create_client_sync") as create_client:
+            connection = connect("libsql://example.turso.io", auth_token="test-token")
+        create_client.assert_called_once_with("https://example.turso.io", auth_token="test-token")
+        self.assertFalse(connection.supports_transactions)
+
     def test_scheduled_api_does_not_quarantine_live_deliveries(self):
         import tempfile
         from pathlib import Path

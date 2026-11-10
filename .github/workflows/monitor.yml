@@ -30,7 +30,7 @@ jobs:
       TELEGRAM_OWNER_ID: ${{ secrets.TELEGRAM_OWNER_ID }}
       CITY24_ENABLED: ${{ vars.CITY24_ENABLED || 'false' }}
       CITY24_MCP_ENABLED: "true"
-      RENTINRIGA_ENABLED: ${{ vars.RENTINRIGA_ENABLED || 'true' }}
+      RENTINRIGA_ENABLED: ${{ vars.RENTINRIGA_ENABLED || 'false' }}
       LATIO_PERMISSION_CONFIRMED: ${{ vars.LATIO_PERMISSION_CONFIRMED || 'false' }}
       POLL_INTERVAL: "3600"
     steps:

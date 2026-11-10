@@ -178,6 +178,16 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.status()["queue"], before)
         self.assertTrue(any(listing["id"] == house.id for listing in self.store.listings()))
 
+    async def test_disabled_rentinriga_is_not_requested(self):
+        self.store.set_setting("catalog_loaded", True)
+        self.monitor.city24_enabled = False
+        self.monitor.rentinriga_enabled = False
+        self.monitor.ss = SimpleNamespace(collect=AsyncMock(return_value=[]), locations=self.store.locations())
+        with patch("backend.service.RentInRigaAdapter.collect", new=AsyncMock()) as collect:
+            await self.monitor.cycle()
+        collect.assert_not_awaited()
+        self.assertEqual(self.store.status()["sources"]["RentInRiga.lv"]["status"], "disabled")
+
     async def test_sources_fail_independently(self):
         """Keep successful SS.lv state when City24 fails and Latio is disabled."""
         self.store.set_setting("catalog_loaded", True)

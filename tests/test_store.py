@@ -61,28 +61,49 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(result["total"], 1)
         self.assertEqual([item["id"] for item in self.store.listings()], ["ss:for-sale"])
 
-    def test_city24_mcp_snapshot_import_is_baseline_only_and_idempotent(self):
-        from backend.city24_mcp_import import import_snapshot, load_snapshot
+    def test_city24_mcp_filters_areas_and_preserves_cached_details(self):
+        from backend.city24_mcp_import import build_mcp_listings
 
-        snapshot = load_snapshot()
-        self.assertEqual(len(snapshot), 35)
-        existing = snapshot[0]
-        existing.title = "Existing record must not be overwritten"
-        self.store.ingest("existing-city24", [existing])
+        cached = {
+            "city24:100": {
+                "title": "Existing house in Vecāķi",
+                "location": "Street 1, Vecāķi, Rīga",
+                "area": 165,
+                "area_raw": "165",
+                "area_status": "parsed",
+                "published_at": "2026-11-09T10:00:00+02:00",
+                "image": "https://static.img-city24.lv/existing.jpg",
+            }
+        }
+        results = {
+            "ss:riga/vecaki": [
+                {"id": "100", "title": "Street 1, Vecāķi, Rīga", "unitType": "House", "transactionType": "sell", "price": 250000, "currency": "EUR", "url": "https://www.city24.lv/real-estate/100"},
+                {"id": "101", "title": "House in Mežaparks, Rīga", "unitType": "House", "transactionType": "sell", "price": 300000, "currency": "EUR", "url": "https://www.city24.lv/real-estate/101"},
+            ],
+            "ss:riga/jaunciems": [
+                {"id": "8467022", "title": "Jaunciema gatve, Jaunciems, Rīga", "unitType": "House", "transactionType": "sell", "price": 190000, "currency": "EUR", "url": "https://www.city24.lv/real-estate/8467022"},
+            ],
+        }
+        listings = build_mcp_listings(results, self.store.locations(), cached)
+        self.assertEqual([item.id for item in listings], ["city24:100"])
+        self.assertEqual(listings[0].area, 165)
+        self.assertEqual(listings[0].published_at, "2026-11-09T10:00:00+02:00")
+        self.assertEqual(listings[0].image, "https://static.img-city24.lv/existing.jpg")
 
-        result = import_snapshot(self.store, snapshot)
-        self.assertEqual(result["added"], 34)
-        self.assertEqual(result["already_present"], 1)
-        self.assertEqual(result["queued"], 0)
-        self.assertEqual(self.store.pending(0), [])
-        records = {record["id"]: record for record in self.store.listings(10000)}
-        self.assertEqual(records[existing.id]["title"], "Existing record must not be overwritten")
-        self.assertEqual(len([record for record in records.values() if record["source"] == "City24.lv"]), 35)
+    def test_city24_mcp_queues_new_ids_after_baseline(self):
+        from backend.city24_mcp_import import sync_mcp_listings
 
-        repeated = import_snapshot(self.store, snapshot)
-        self.assertEqual(repeated["added"], 0)
-        self.assertEqual(repeated["already_present"], 35)
-        self.assertEqual(self.store.pending(0), [])
+        first = listing("city24:old")
+        first.source = "City24.lv"
+        baseline = sync_mcp_listings(self.store, [first])
+        self.assertEqual(baseline["queued"], 0)
+
+        second = listing("city24:new")
+        second.source = "City24.lv"
+        result = sync_mcp_listings(self.store, [first, second])
+        self.assertEqual(result["discovered"], 1)
+        self.assertEqual(result["queued"], 1)
+        self.assertEqual(self.store.pending(0)[0]["listing_id"], second.id)
 
     def test_cleanup_removes_legacy_buyer_request_history(self):
         """Delete old buyer-request rows and their search and notification references."""

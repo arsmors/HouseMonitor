@@ -9,6 +9,7 @@ import uuid
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
 
+from backend.city24_mcp_import import refresh_mcp
 from backend.service import DEFAULT_INTERVAL, Monitor
 from backend.sources import now
 from backend.store import Store
@@ -68,6 +69,22 @@ async def collect(monitor: Monitor):
             "error": telegram_error or (None if bot else "Set Telegram credentials in GitHub Actions secrets to enable alerts"),
         })
         await asyncio.wait_for(monitor.cycle(), timeout=990)
+        if os.getenv("CITY24_MCP_ENABLED", "false").lower() == "true":
+            try:
+                result = await asyncio.wait_for(refresh_mcp(monitor.store), timeout=240)
+                LOGGER.info(
+                    "City24 MCP: %s listings checked, %s discovered, %s notifications queued",
+                    result["total"], result["discovered"], result["queued"],
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                previous = monitor.store.status()["sources"].get("City24.lv", {})
+                reason = str(error)[:250] if isinstance(error, (ValueError, RuntimeError)) else type(error).__name__ + ": City24 MCP request failed"
+                state = {**previous, "status": "error", "error": reason}
+                monitor.store.source_state("City24.lv", state)
+                monitor.store.event("City24.lv: " + reason)
+                LOGGER.error("City24 MCP collection failed: %s", reason)
         try:
             await asyncio.wait_for(monitor.enrich_images(), timeout=90)
         except asyncio.TimeoutError:

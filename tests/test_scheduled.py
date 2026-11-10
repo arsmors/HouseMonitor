@@ -141,6 +141,15 @@ class ScheduledTests(unittest.IsolatedAsyncioTestCase):
         self.monitor.deliver.assert_not_awaited()
         self.assertFalse(self.store.setting("scheduled_telegram")["configured"])
 
+    async def test_collection_refreshes_city24_from_mcp_when_enabled(self):
+        self.monitor.cycle = AsyncMock()
+        self.monitor.enrich_images = AsyncMock()
+        result = {"total": 35, "discovered": 0, "queued": 0}
+        with patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "", "TELEGRAM_OWNER_ID": "", "CITY24_MCP_ENABLED": "true"}):
+            with patch("backend.scheduled.refresh_mcp", new=AsyncMock(return_value=result)) as refresh:
+                await collect(self.monitor)
+        refresh.assert_awaited_once_with(self.store)
+
     async def test_failed_source_error_is_reported_after_other_work(self):
         self.store.source_state("RentInRiga.lv", {
             "status": "error", "error": "Cannot verify www.rentinriga.lv robots.txt (403)"

@@ -230,7 +230,7 @@ class Monitor:
                     state["scope"] = rent_scope
                 self.store.source_state(source, state)
                 self.store.event(f"{source}: {reason}")
-                LOGGER.warning("%s collection failed: %s", source, type(error).__name__)
+                LOGGER.warning("%s collection failed: %s", source, reason)
                 if failures >= 3 and not previous.get("alerted") and self.bot and self.store.setting("telegram_ready"):
                     try:
                         await self.bot.send_message(self.owner_id, f"Monitoring warning: {source} has failed {failures} times. Other sources continue. Check /status.")

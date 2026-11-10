@@ -77,9 +77,13 @@ async def collect(monitor: Monitor):
             await asyncio.wait_for(monitor.deliver(), timeout=60)
         if telegram_error:
             raise RuntimeError(telegram_error)
-        failed = [source for source, state in monitor.store.status()["sources"].items() if state.get("status") == "error"]
+        failed = [
+            f"{source}: {state.get('error') or 'unknown source error'}"
+            for source, state in monitor.store.status()["sources"].items()
+            if state.get("status") == "error"
+        ]
         if failed:
-            raise RuntimeError("Source checks failed; inspect dashboard status: " + ", ".join(failed))
+            raise RuntimeError("Source checks failed: " + "; ".join(failed))
     finally:
         monitor.bot = None
         if bot:

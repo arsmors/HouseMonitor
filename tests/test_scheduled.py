@@ -141,12 +141,14 @@ class ScheduledTests(unittest.IsolatedAsyncioTestCase):
         self.monitor.deliver.assert_not_awaited()
         self.assertFalse(self.store.setting("scheduled_telegram")["configured"])
 
-    async def test_failed_source_causes_workflow_failure_after_other_work(self):
-        self.store.source_state("SS.lv", {"status": "error"})
+    async def test_failed_source_error_is_reported_after_other_work(self):
+        self.store.source_state("RentInRiga.lv", {
+            "status": "error", "error": "Cannot verify www.rentinriga.lv robots.txt (403)"
+        })
         self.monitor.cycle = AsyncMock()
         self.monitor.enrich_images = AsyncMock()
         with patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "", "TELEGRAM_OWNER_ID": ""}):
-            with self.assertRaisesRegex(RuntimeError, "SS.lv"):
+            with self.assertRaisesRegex(RuntimeError, r"RentInRiga.lv: Cannot verify www.rentinriga.lv robots.txt \(403\)"):
                 await collect(self.monitor)
         self.monitor.enrich_images.assert_awaited_once()
 

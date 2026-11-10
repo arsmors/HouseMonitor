@@ -93,8 +93,14 @@
 .setting-row p { overflow-wrap: anywhere; }
 .neutral-badge { white-space: normal; text-align: center; flex-shrink: 0; max-width: 130px; }
 .message-body h3 { overflow-wrap: anywhere; }
+.listing-controls { display: flex; align-items: center; gap: 12px; }
+.listing-sort { display: flex; align-items: center; gap: 8px; color: #697468; font-size: 11px; }
+.listing-sort select { min-width: 142px; min-height: 36px; padding: 6px 28px 6px 9px; border: 1px solid #dfe5dc; border-radius: 4px; background: #fff; color: #39463c; font: inherit; }
+.listing-sort select:focus-visible { outline: 3px solid #8eae65; outline-offset: 2px; }
 button:disabled { opacity: 0.6; cursor: default; }
 @media (max-width: 480px) {
+  .listing-controls { align-items: stretch; flex-direction: column; }
+  .listing-sort { justify-content: space-between; }
   .activity-detail { flex-direction: column; }
   .activity-detail > span { max-width: 100%; }
   .activity-detail > strong { text-align: left; max-width: 100%; }

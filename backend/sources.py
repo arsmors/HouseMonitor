@@ -22,7 +22,7 @@ from bs4 import BeautifulSoup
 SS_ROOT = "https://www.ss.lv/lv/real-estate/homes-summer-residences/"
 DEFAULT_PATHS = ["riga-region/carnikavas-nov", "riga/vecaki", "riga/mangalsala", "riga/vecdaugava", "riga/trisciems", "riga/jaunciems"]
 DEFAULT_LABELS = ["Carnikavas novads", "Vecāķi", "Mangaļsala", "Vecdaugava", "Trīsciems", "Jaunciems"]
-RECENT_LOCATION_IDS = ["ss:riga/vecdaugava", "ss:riga/vecaki", "ss:riga-region/carnikavas-nov", "ss:riga/trisciems", "ss:riga/jaunciems"]
+RECENT_LOCATION_IDS = ["ss:riga/vecdaugava", "ss:riga/vecaki", "ss:riga-region/carnikavas-nov", "ss:riga/mangalsala", "ss:riga/trisciems", "ss:riga/jaunciems"]
 CITY24_AREA_SEARCHES = {
     "ss:riga-region/carnikavas-nov": "https://www.city24.lv/real-estate-search/houses-for-sale/adazu-nov-carnikavas-pag/id=245490-parish",
     "ss:riga/mangalsala": "https://www.city24.lv/real-estate-search/houses-for-sale/riga-mangalu-pussala/id=270744-district",

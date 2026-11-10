@@ -3,6 +3,10 @@
     "Vercel": {
       "type": "http",
       "url": "https://mcp.vercel.com"
+    },
+    "real-estate": {
+      "type": "http",
+      "url": "https://mcp.city24.lv/_mcp"
     }
   }
 }

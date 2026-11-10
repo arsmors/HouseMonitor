@@ -61,6 +61,29 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(result["total"], 1)
         self.assertEqual([item["id"] for item in self.store.listings()], ["ss:for-sale"])
 
+    def test_city24_mcp_snapshot_import_is_baseline_only_and_idempotent(self):
+        from backend.city24_mcp_import import import_snapshot, load_snapshot
+
+        snapshot = load_snapshot()
+        self.assertEqual(len(snapshot), 35)
+        existing = snapshot[0]
+        existing.title = "Existing record must not be overwritten"
+        self.store.ingest("existing-city24", [existing])
+
+        result = import_snapshot(self.store, snapshot)
+        self.assertEqual(result["added"], 34)
+        self.assertEqual(result["already_present"], 1)
+        self.assertEqual(result["queued"], 0)
+        self.assertEqual(self.store.pending(0), [])
+        records = {record["id"]: record for record in self.store.listings(10000)}
+        self.assertEqual(records[existing.id]["title"], "Existing record must not be overwritten")
+        self.assertEqual(len([record for record in records.values() if record["source"] == "City24.lv"]), 35)
+
+        repeated = import_snapshot(self.store, snapshot)
+        self.assertEqual(repeated["added"], 0)
+        self.assertEqual(repeated["already_present"], 35)
+        self.assertEqual(self.store.pending(0), [])
+
     def test_cleanup_removes_legacy_buyer_request_history(self):
         """Delete old buyer-request rows and their search and notification references."""
         buyer_request = listing("ss:legacy-wanted")

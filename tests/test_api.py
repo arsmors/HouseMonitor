@@ -51,17 +51,17 @@ class APITests(unittest.IsolatedAsyncioTestCase):
     async def test_listings_visible_without_saved_searches(self):
         """Browsing saved ads does not depend on notification search configuration."""
         house = Listing("ss:house", "SS.lv", "House", "https://www.ss.lv/msg/house.html", "100,000 EUR", "Vecaki", ["ss:riga/vecaki"], 165, "165", "parsed")
-        outside = Listing("ss:outside", "SS.lv", "Other house", "https://www.ss.lv/msg/other.html", "100,000 EUR", "Mangalsala", ["ss:riga/mangalsala"], 165, "165", "parsed")
-        self.store.ingest("scope", [house, outside])
+        mangalsala = Listing("ss:mangalsala", "SS.lv", "House in Mangalsala", "https://www.ss.lv/msg/mangalsala.html", "100,000 EUR", "Mangalsala", ["ss:riga/mangalsala"], 165, "165", "parsed")
+        self.store.ingest("scope", [house, mangalsala])
         response = await self.client.get("/api/state")
-        self.assertEqual([item["id"] for item in (await response.json())["listings"]], [house.id])
+        self.assertEqual({item["id"] for item in (await response.json())["listings"]}, {house.id, mangalsala.id})
         for search in self.store.searches():
             self.store.delete_search(search["id"])
         response = await self.client.get("/api/state")
         self.assertEqual(response.status, 200)
         data = await response.json()
         self.assertEqual(data["searches"], [])
-        self.assertEqual([item["id"] for item in data["listings"]], [house.id])
+        self.assertEqual({item["id"] for item in data["listings"]}, {house.id, mangalsala.id})
 
     async def test_password_auth_and_local_health(self):
         """Require configured owner credentials while allowing local Docker health probes."""

@@ -4,6 +4,12 @@ on:
   schedule:
     - cron: "17 * * * *"
   workflow_dispatch:
+    inputs:
+      import_city24_mcp_snapshot:
+        description: Import the captured City24 MCP ads into Turso instead of running collectors
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -22,7 +28,7 @@ jobs:
       TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_OWNER_ID: ${{ secrets.TELEGRAM_OWNER_ID }}
-      CITY24_ENABLED: ${{ vars.CITY24_ENABLED || 'true' }}
+      CITY24_ENABLED: ${{ vars.CITY24_ENABLED || 'false' }}
       RENTINRIGA_ENABLED: ${{ vars.RENTINRIGA_ENABLED || 'true' }}
       LATIO_PERMISSION_CONFIRMED: ${{ vars.LATIO_PERMISSION_CONFIRMED || 'false' }}
       POLL_INTERVAL: "3600"
@@ -33,6 +39,10 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: python -m pip install -r requirements.txt
-      - run: python -m unittest tests.test_database tests.test_scheduled
-      - run: python -m playwright install --with-deps chromium
-      - run: python -m backend.scheduled
+      - run: python -m unittest tests.test_database tests.test_scheduled tests.test_store
+      - if: ${{ inputs.import_city24_mcp_snapshot != true }}
+        run: python -m playwright install --with-deps chromium
+      - if: ${{ inputs.import_city24_mcp_snapshot == true }}
+        run: python -m backend.city24_mcp_import
+      - if: ${{ inputs.import_city24_mcp_snapshot != true }}
+        run: python -m backend.scheduled

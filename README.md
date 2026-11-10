@@ -83,7 +83,7 @@ The collector job uses the GitHub environment named `prod`. Under **Settings > E
 - `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`: the same database used by Vercel.
 - Optional `TELEGRAM_BOT_TOKEN` and `TELEGRAM_OWNER_ID`: set both, or leave both absent.
 
-Optional Actions **variables**: `CITY24_ENABLED` and `RENTINRIGA_ENABLED` default to `false` in the workflow while these providers block collection. SS.lv remains enabled. Set either variable to `true` only after approved access is available; disabled sources are reported explicitly in the dashboard. Local continuous-mode defaults are unchanged. `LATIO_PERMISSION_CONFIRMED` defaults to `false` and must remain false unless permission has been obtained.
+Optional Actions **variables**: `CITY24_ENABLED` and `RENTINRIGA_ENABLED` default to `true` in the workflow; set either to `false` to disable that collector. SS.lv remains enabled, and disabled sources are reported explicitly in the dashboard. Local continuous-mode defaults are unchanged. `LATIO_PERMISSION_CONFIRMED` defaults to `false` and must remain false unless permission has been obtained.
 
 Push the changes to the default branch and enable Actions. Open **Actions > Hourly house checks > Run workflow** for the first scan. Subsequent runs are scheduled at minute 17 of every hour (UTC), avoiding the busiest top-of-hour period. GitHub can delay or drop scheduled runs under load, and public repositories' schedules can be disabled after 60 days without repository activity. Monitor workflow failures and re-enable inactive schedules when needed.
 
